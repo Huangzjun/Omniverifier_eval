@@ -1,0 +1,18 @@
+# GenEval++ evaluation config
+benchmark: "geneval_plus"
+
+data:
+  # GenEval++ prompt file (from original GenEval repo or VQAScore)
+  prompts_file: "data/geneval_plus_prompts.json"
+  categories:
+    - "single_object"
+    - "two_objects"
+    - "counting"
+    - "colors"
+    - "position"
+    - "color_attribution"
+
+evaluation:
+  method: "vqascore"
+  # VQAScore uses CLIP-FlanT5-XXL by default
+  vqascore_model: "clip-flant5-xxl"

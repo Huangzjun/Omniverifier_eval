@@ -1,0 +1,19 @@
+# T2I-ReasonBench evaluation config
+benchmark: "t2i_reasonbench"
+
+data:
+  prompts_dir: "data/t2i_reasonbench_raw/prompts"
+  eval_questions_dir: "data/t2i_reasonbench_raw/deepseek_evaluatioin_qs"
+  dimensions:
+    - "idiom_interpretation"
+    - "textual_image_design"
+    - "entity_reasoning"
+    - "scientific_reasoning"
+  prompts_per_dimension: 200
+  total_prompts: 800
+
+evaluation:
+  judge_model: "Qwen/Qwen2.5-VL-7B-Instruct"
+  # Two-stage evaluation: LLM generates QA pairs, MLLM scores image
+  scoring: "two_stage"
+  max_score: 10
