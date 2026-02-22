@@ -180,6 +180,31 @@ class DiffusionGenerator(BaseGenerator):
         image = output.images[0]
         return GenerationResult(image=image, prompt=prompt)
 
+    def generate_batch(self, prompts: list[str], **kwargs) -> list[GenerationResult]:
+        """Generate images for multiple prompts in a single forward pass."""
+        if self._pipe is None:
+            self.load()
+
+        gen_kwargs = {
+            "prompt": prompts,
+            "num_inference_steps": kwargs.get("num_inference_steps", self.num_inference_steps),
+            "guidance_scale": kwargs.get("guidance_scale", self.guidance_scale),
+            "height": kwargs.get("height", self.height),
+            "width": kwargs.get("width", self.width),
+        }
+
+        try:
+            output = self._pipe(**gen_kwargs)
+        except TypeError:
+            gen_kwargs.pop("height", None)
+            gen_kwargs.pop("width", None)
+            output = self._pipe(**gen_kwargs)
+
+        return [
+            GenerationResult(image=img, prompt=p)
+            for img, p in zip(output.images, prompts)
+        ]
+
     def edit(self, image: Image.Image, original_prompt: str, edit_instruction: str, **kwargs) -> GenerationResult:
         """Pure T2I models cannot natively edit. Regenerate with combined prompt."""
         combined = f"{original_prompt}. {edit_instruction}"

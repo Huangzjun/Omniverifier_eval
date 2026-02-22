@@ -100,15 +100,44 @@ CONDITIONS_BY_ID = {c.id: c for c in CONDITIONS}
 #  Helpers
 # ═══════════════════════════════════════════════════════════════════
 
-def load_step0_images(images_dir: Path) -> dict[str, Image.Image]:
-    """Load all step-0 images from a directory, keyed by sample id."""
-    images = {}
-    if not images_dir.exists():
-        return images
-    for p in sorted(images_dir.glob("*.png")):
-        sample_id = p.stem
-        images[sample_id] = Image.open(p).convert("RGB")
-    return images
+class LazyImageDir(dict):
+    """Dict-like that lazily loads images from a directory on access.
+
+    Avoids loading all images into memory at once — each image is read
+    from disk when accessed and NOT cached, so memory stays low.
+    """
+
+    def __init__(self, images_dir: Path):
+        super().__init__()
+        self._dir = images_dir
+        self._ids = {p.stem for p in images_dir.glob("*.png")} if images_dir.exists() else set()
+
+    def __contains__(self, key):
+        return key in self._ids
+
+    def __getitem__(self, key):
+        if key not in self._ids:
+            raise KeyError(key)
+        return Image.open(self._dir / f"{key}.png").convert("RGB")
+
+    def __len__(self):
+        return len(self._ids)
+
+    def __iter__(self):
+        return iter(self._ids)
+
+    def get(self, key, default=None):
+        if key in self._ids:
+            return self[key]
+        return default
+
+    def keys(self):
+        return self._ids
+
+
+def load_step0_images(images_dir: Path) -> LazyImageDir:
+    """Return a lazy-loading dict backed by image files on disk."""
+    return LazyImageDir(images_dir)
 
 
 def run_step0_generation(
@@ -116,32 +145,67 @@ def run_step0_generation(
     samples: list,
     output_dir: Path,
     logger,
+    batch_size: int = 4,
 ) -> dict[str, Image.Image]:
-    """Generate step-0 images for a condition."""
+    """Generate step-0 images for a condition.
+
+    For diffusion models, generates in batches of `batch_size` for speed.
+    Already-generated images are skipped automatically.
+    """
     images_dir = ensure_dir(output_dir / f"cond{cond.id}_{cond.generator}" / "images")
 
-    # Check for existing images
-    existing = load_step0_images(images_dir)
-    if len(existing) >= len(samples):
-        logger.info(f"  [{cond.name}] Found {len(existing)} cached images, skipping generation")
-        return existing
+    # Check for existing images (skip already generated)
+    existing_ids = {p.stem for p in images_dir.glob("*.png")}
+    pending = [s for s in samples if s.id not in existing_ids]
+
+    if not pending:
+        logger.info(f"  [{cond.name}] All {len(samples)} images already exist, skipping generation")
+        return LazyImageDir(images_dir)
+
+    logger.info(f"  [{cond.name}] {len(existing_ids)} cached, {len(pending)} to generate")
 
     # Build generator
     logger.info(f"  [{cond.name}] Building generator: {cond.generator}")
     generator = build_generator(cond.generator)
 
-    images = dict(existing)  # start from cache
-    for sample in tqdm(samples, desc=f"Gen {cond.name}"):
-        if sample.id in images:
-            continue
-        try:
-            result = generator.generate(sample.prompt)
-            save_image(result.image, images_dir / f"{sample.id}.png")
-            images[sample.id] = result.image
-        except Exception as e:
-            logger.error(f"  [{cond.name}] Generation failed for {sample.id}: {e}")
+    from generators.diffusion_models import DiffusionGenerator
+    use_batch = isinstance(generator, DiffusionGenerator) and batch_size > 1
 
-    logger.info(f"  [{cond.name}] Generated {len(images)} / {len(samples)} images")
+    if use_batch:
+        logger.info(f"  [{cond.name}] Batch mode enabled (batch_size={batch_size})")
+        for i in tqdm(range(0, len(pending), batch_size), desc=f"Gen {cond.name} (batch={batch_size})"):
+            batch_samples = pending[i : i + batch_size]
+            prompts = [s.prompt for s in batch_samples]
+            try:
+                results = generator.generate_batch(prompts)
+                for sample, result in zip(batch_samples, results):
+                    save_image(result.image, images_dir / f"{sample.id}.png")
+            except Exception as e:
+                logger.error(f"  [{cond.name}] Batch generation failed, falling back to single: {e}")
+                for sample in batch_samples:
+                    try:
+                        result = generator.generate(sample.prompt)
+                        save_image(result.image, images_dir / f"{sample.id}.png")
+                    except Exception as e2:
+                        logger.error(f"  [{cond.name}] Generation failed for {sample.id}: {e2}")
+    else:
+        for sample in tqdm(pending, desc=f"Gen {cond.name}"):
+            try:
+                result = generator.generate(sample.prompt)
+                save_image(result.image, images_dir / f"{sample.id}.png")
+            except Exception as e:
+                logger.error(f"  [{cond.name}] Generation failed for {sample.id}: {e}")
+
+    # Free generator GPU memory before evaluation
+    del generator
+    import gc, torch
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Return lazy-loading dict (images read from disk on demand, not all at once)
+    images = LazyImageDir(images_dir)
+    logger.info(f"  [{cond.name}] Total: {len(images)} / {len(samples)} images")
     return images
 
 
@@ -342,6 +406,10 @@ def parse_args():
         "--tts_rounds", type=int, default=3,
         help="Max TTS rounds for conditions 7-10."
     )
+    parser.add_argument(
+        "--batch_size", type=int, default=4,
+        help="Batch size for diffusion model generation (default: 4)."
+    )
     return parser.parse_args()
 
 
@@ -419,7 +487,7 @@ def main():
             if c.id not in needed_step0:
                 continue
             logger.info(f"\n  Condition {c.id}: {c.name}")
-            images = run_step0_generation(c, samples, bench_dir, logger)
+            images = run_step0_generation(c, samples, bench_dir, logger, batch_size=args.batch_size)
             step0_cache[c.id] = images
 
         # ── Phase 2: Run TTS loops ───────────────────────────────
