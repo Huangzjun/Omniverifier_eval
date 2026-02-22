@@ -69,12 +69,11 @@ class T2IReasonBenchDataset(BaseDataset):
                 # Handle both list-of-strings and list-of-dicts formats
                 if isinstance(prompt_entry, str):
                     prompt_text = prompt_entry
-                    sample_id = f"{dim}_{idx:04d}"
                 elif isinstance(prompt_entry, dict):
                     prompt_text = prompt_entry.get("prompt", prompt_entry.get("text", ""))
-                    sample_id = prompt_entry.get("id", f"{dim}_{idx:04d}")
                 else:
                     continue
+                sample_id = f"{dim}_{idx:04d}"
 
                 # Attach evaluation QA pairs
                 metadata = {

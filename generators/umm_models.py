@@ -37,92 +37,89 @@ class JanusProGenerator(BaseGenerator):
 
     def load(self) -> None:
         """Load Janus-Pro model."""
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
         print(f"[JanusPro] Loading model from {self.model_path} ...")
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
-        self._model = AutoModelForCausalLM.from_pretrained(
+
+        from janus.models import MultiModalityCausalLM, VLChatProcessor
+
+        self._processor = VLChatProcessor.from_pretrained(self.model_path)
+        self._tokenizer = self._processor.tokenizer
+        self._model = MultiModalityCausalLM.from_pretrained(
             self.model_path,
             torch_dtype=self.torch_dtype,
-            trust_remote_code=True,
         ).to(self.device).eval()
-
-        # Load VL processor if available
-        try:
-            from janus.models import VLChatProcessor
-            self._processor = VLChatProcessor.from_pretrained(self.model_path)
-        except ImportError:
-            from transformers import AutoProcessor
-            self._processor = AutoProcessor.from_pretrained(self.model_path, trust_remote_code=True)
 
         print("[JanusPro] Model loaded successfully")
 
+    @torch.inference_mode()
     def generate(self, prompt: str, **kwargs) -> GenerationResult:
-        """Generate image using Janus-Pro."""
+        """Generate image using Janus-Pro official generation pipeline."""
+        import numpy as np
+
         if self._model is None:
             self.load()
 
-        # Janus-Pro generation uses a specific conversation format
-        conversation = [{"role": "User", "content": prompt}, {"role": "Assistant", "content": ""}]
+        temperature = kwargs.get("temperature", 1.0)
+        cfg_weight = kwargs.get("cfg_weight", 5.0)
+        image_token_num = kwargs.get("image_token_num", 576)
+        img_size = kwargs.get("img_size", 384)
+        patch_size = kwargs.get("patch_size", 16)
 
-        # Try the official Janus generation API
-        try:
-            return self._generate_official(prompt, conversation, **kwargs)
-        except Exception:
-            return self._generate_transformers(prompt, **kwargs)
-
-    def _generate_official(self, prompt: str, conversation: list, **kwargs) -> GenerationResult:
-        """Generate using Janus official API."""
-        from janus.models import MultiModalityCausalLM
-        from janus.utils.io import generate_image
-
-        images = generate_image(
-            model=self._model,
-            processor=self._processor,
-            prompt=prompt,
-            num_images=1,
-            cfg_weight=kwargs.get("cfg_weight", 5.0),
-            temperature=kwargs.get("temperature", 1.0),
-            image_token_num_per_image=kwargs.get("image_token_num", 576),
-            patch_size=16,
-            image_size=384,
+        conversation = [
+            {"role": "User", "content": prompt},
+            {"role": "Assistant", "content": ""},
+        ]
+        sft_format = self._processor.apply_sft_template_for_multi_turn_prompts(
+            conversations=conversation,
+            sft_format=self._processor.sft_format,
+            system_prompt="",
         )
-        image = images[0] if isinstance(images, list) else images
-        if not isinstance(image, Image.Image):
-            import numpy as np
-            image = Image.fromarray(np.uint8(image))
-        return GenerationResult(image=image.convert("RGB"), prompt=prompt)
+        prompt_text = sft_format + self._processor.image_start_tag
 
-    def _generate_transformers(self, prompt: str, **kwargs) -> GenerationResult:
-        """Fallback generation via transformers generate()."""
-        # Construct the generation input
-        input_text = f"<image_generation>{prompt}"
-        inputs = self._tokenizer(input_text, return_tensors="pt").to(self.device)
+        input_ids = self._processor.tokenizer.encode(prompt_text)
+        input_ids = torch.LongTensor(input_ids)
 
-        with torch.no_grad():
-            outputs = self._model.generate(
-                **inputs,
-                max_new_tokens=kwargs.get("max_new_tokens", 4096),
-                do_sample=True,
-                temperature=kwargs.get("temperature", 1.0),
+        # CFG: paired conditional / unconditional tokens
+        tokens = torch.zeros((2, len(input_ids)), dtype=torch.int, device=self.device)
+        tokens[0, :] = input_ids
+        tokens[1, :] = input_ids
+        tokens[1, 1:-1] = self._processor.pad_id
+
+        inputs_embeds = self._model.language_model.get_input_embeddings()(tokens)
+        generated_tokens = torch.zeros((1, image_token_num), dtype=torch.int, device=self.device)
+
+        past_key_values = None
+        for i in range(image_token_num):
+            outputs = self._model.language_model.model(
+                inputs_embeds=inputs_embeds,
+                use_cache=True,
+                past_key_values=past_key_values,
             )
+            past_key_values = outputs.past_key_values
+            hidden_states = outputs.last_hidden_state
 
-        # Decode image tokens from output
-        generated_ids = outputs[0, inputs.input_ids.shape[1]:]
-        image = self._decode_image_tokens(generated_ids)
-        return GenerationResult(image=image, prompt=prompt)
+            logits = self._model.gen_head(hidden_states[:, -1, :])
+            logit_cond = logits[0:1, :]
+            logit_uncond = logits[1:2, :]
 
-    def _decode_image_tokens(self, token_ids: torch.Tensor) -> Image.Image:
-        """Decode generated tokens to image using the model's visual decoder."""
-        if hasattr(self._model, "decode_image"):
-            image = self._model.decode_image(token_ids.unsqueeze(0))
-            if isinstance(image, torch.Tensor):
-                import numpy as np
-                image = image.squeeze().permute(1, 2, 0).cpu().numpy()
-                image = (image * 255).clip(0, 255).astype(np.uint8)
-                return Image.fromarray(image)
-            return image
-        raise RuntimeError("Cannot decode image tokens - model lacks decode_image method")
+            logits = logit_uncond + cfg_weight * (logit_cond - logit_uncond)
+            probs = torch.softmax(logits / temperature, dim=-1)
+
+            next_token = torch.multinomial(probs, num_samples=1)
+            generated_tokens[:, i] = next_token.squeeze(dim=-1)
+
+            next_token_paired = torch.cat([next_token, next_token], dim=0).view(-1)
+            img_embeds = self._model.prepare_gen_img_embeds(next_token_paired)
+            inputs_embeds = img_embeds.unsqueeze(dim=1)
+
+        dec = self._model.gen_vision_model.decode_code(
+            generated_tokens.to(dtype=torch.int),
+            shape=[1, 8, img_size // patch_size, img_size // patch_size],
+        )
+        dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+        dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
+
+        image = Image.fromarray(dec[0])
+        return GenerationResult(image=image.convert("RGB"), prompt=prompt)
 
     def edit(self, image: Image.Image, original_prompt: str, edit_instruction: str, **kwargs) -> GenerationResult:
         """Janus-Pro: no native editing, regenerate with combined prompt."""
@@ -146,102 +143,115 @@ class BAGELGenerator(BaseGenerator):
         device: str = "cuda",
         torch_dtype: str = "bfloat16",
         use_thinking: bool = True,
+        bagel_repo: str = "bagel_repo",
     ):
         super().__init__(name="bagel")
         self.model_path = model_path
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.use_thinking = use_thinking
-        self._model = None
-        self._processor = None
+        self.bagel_repo = bagel_repo
+        self._inferencer = None
 
     def load(self) -> None:
-        """Load BAGEL model."""
+        """Load BAGEL model using official pipeline."""
+        import sys, os
+        from pathlib import Path
+
+        repo_root = str(Path(__file__).parent.parent / self.bagel_repo)
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+
         print(f"[BAGEL] Loading model from {self.model_path} ...")
 
-        try:
-            # Try official BAGEL loading
-            from bagel import BAGELModel
-            self._model = BAGELModel.from_pretrained(
-                self.model_path,
-                torch_dtype=self.torch_dtype,
-            ).to(self.device).eval()
-        except ImportError:
-            # Fallback to transformers
-            from transformers import AutoModelForCausalLM, AutoProcessor
-            self._model = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                torch_dtype=self.torch_dtype,
-                trust_remote_code=True,
-            ).to(self.device).eval()
-            self._processor = AutoProcessor.from_pretrained(
-                self.model_path, trust_remote_code=True
-            )
+        from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
+        from data.data_utils import add_special_tokens
+        from data.transforms import ImageTransform
+        from inferencer import InterleaveInferencer
+        from modeling.autoencoder import load_ae
+        from modeling.bagel import BagelConfig, Bagel, Qwen2Config, Qwen2ForCausalLM
+        from modeling.bagel import SiglipVisionConfig, SiglipVisionModel
+        from modeling.qwen2 import Qwen2Tokenizer
 
+        llm_config = Qwen2Config.from_json_file(os.path.join(self.model_path, "llm_config.json"))
+        llm_config.qk_norm = True
+        llm_config.tie_word_embeddings = False
+        llm_config.layer_module = "Qwen2MoTDecoderLayer"
+
+        vit_config = SiglipVisionConfig.from_json_file(os.path.join(self.model_path, "vit_config.json"))
+        vit_config.rope = False
+        vit_config.num_hidden_layers -= 1
+
+        vae_model, vae_config = load_ae(local_path=os.path.join(self.model_path, "ae.safetensors"))
+
+        config = BagelConfig(
+            visual_gen=True, visual_und=True,
+            llm_config=llm_config, vit_config=vit_config, vae_config=vae_config,
+            vit_max_num_patch_per_side=70, connector_act='gelu_pytorch_tanh',
+            latent_patch_size=2, max_latent_size=64,
+        )
+
+        with init_empty_weights():
+            language_model = Qwen2ForCausalLM(llm_config)
+            vit_model = SiglipVisionModel(vit_config)
+            model = Bagel(language_model, vit_model, config)
+            model.vit_model.vision_model.embeddings.convert_conv2d_to_linear(vit_config, meta=True)
+
+        tokenizer = Qwen2Tokenizer.from_pretrained(self.model_path)
+        tokenizer, new_token_ids, _ = add_special_tokens(tokenizer)
+
+        device_map = infer_auto_device_map(
+            model,
+            max_memory={i: "80GiB" for i in range(torch.cuda.device_count())},
+            no_split_module_classes=["Bagel", "Qwen2MoTDecoderLayer"],
+        )
+        same_device_modules = [
+            'language_model.model.embed_tokens', 'time_embedder',
+            'latent_pos_embed', 'vae2llm', 'llm2vae', 'connector', 'vit_pos_embed',
+        ]
+        first_device = device_map.get(same_device_modules[0], "cuda:0")
+        for k in same_device_modules:
+            device_map[k] = first_device
+
+        model = load_checkpoint_and_dispatch(
+            model,
+            checkpoint=os.path.join(self.model_path, "ema.safetensors"),
+            device_map=device_map, offload_buffers=True,
+            dtype=torch.bfloat16, force_hooks=True,
+        ).eval()
+
+        vae_transform = ImageTransform(1024, 512, 16)
+        vit_transform = ImageTransform(980, 224, 14)
+
+        self._inferencer = InterleaveInferencer(
+            model=model, vae_model=vae_model, tokenizer=tokenizer,
+            vae_transform=vae_transform, vit_transform=vit_transform,
+            new_token_ids=new_token_ids,
+        )
         print(f"[BAGEL] Model loaded (thinking={'on' if self.use_thinking else 'off'})")
 
+    @torch.inference_mode()
     def generate(self, prompt: str, **kwargs) -> GenerationResult:
-        """Generate image using BAGEL."""
-        if self._model is None:
+        """Generate image using BAGEL official pipeline."""
+        if self._inferencer is None:
             self.load()
 
-        # BAGEL supports a "thinking" mode that improves generation quality
-        gen_prompt = prompt
-        if self.use_thinking:
-            gen_prompt = f"<think>\n</think>\n{prompt}"
-
-        try:
-            return self._generate_official(gen_prompt, **kwargs)
-        except Exception:
-            return self._generate_transformers(gen_prompt, **kwargs)
-
-    def _generate_official(self, prompt: str, **kwargs) -> GenerationResult:
-        """Generate using BAGEL official API."""
-        image = self._model.generate_image(
-            prompt=prompt,
-            num_inference_steps=kwargs.get("num_inference_steps", 50),
-            guidance_scale=kwargs.get("guidance_scale", 7.5),
-            height=kwargs.get("height", 1024),
-            width=kwargs.get("width", 1024),
+        result = self._inferencer(
+            text=prompt,
+            think=self.use_thinking,
+            cfg_text_scale=kwargs.get("cfg_text_scale", 4.0),
+            cfg_img_scale=kwargs.get("cfg_img_scale", 1.5),
+            cfg_interval=kwargs.get("cfg_interval", [0.4, 1.0]),
+            timestep_shift=kwargs.get("timestep_shift", 3.0),
+            num_timesteps=kwargs.get("num_timesteps", 50),
+            cfg_renorm_min=kwargs.get("cfg_renorm_min", 0.0),
+            cfg_renorm_type=kwargs.get("cfg_renorm_type", "global"),
+            image_shapes=kwargs.get("image_shapes", (1024, 1024)),
         )
-        if isinstance(image, list):
-            image = image[0]
+        image = result["image"]
         if not isinstance(image, Image.Image):
             import numpy as np
             image = Image.fromarray(np.uint8(image))
-        return GenerationResult(image=image.convert("RGB"), prompt=prompt)
-
-    def _generate_transformers(self, prompt: str, **kwargs) -> GenerationResult:
-        """Fallback generation via transformers."""
-        if self._processor is None:
-            from transformers import AutoProcessor
-            self._processor = AutoProcessor.from_pretrained(
-                self.model_path, trust_remote_code=True
-            )
-
-        inputs = self._processor(text=prompt, return_tensors="pt").to(self.device)
-
-        with torch.no_grad():
-            outputs = self._model.generate(
-                **inputs,
-                max_new_tokens=kwargs.get("max_new_tokens", 8192),
-                do_sample=True,
-                temperature=kwargs.get("temperature", 1.0),
-            )
-
-        # Extract image from outputs
-        generated_ids = outputs[0, inputs.input_ids.shape[1]:]
-        if hasattr(self._model, "decode_image"):
-            image = self._model.decode_image(generated_ids.unsqueeze(0))
-        else:
-            raise RuntimeError("Cannot decode - model lacks decode_image method")
-
-        if isinstance(image, torch.Tensor):
-            import numpy as np
-            image = image.squeeze().permute(1, 2, 0).cpu().numpy()
-            image = (image * 255).clip(0, 255).astype(np.uint8)
-            image = Image.fromarray(image)
-
         return GenerationResult(image=image.convert("RGB"), prompt=prompt)
 
     def edit(self, image: Image.Image, original_prompt: str, edit_instruction: str, **kwargs) -> GenerationResult:
