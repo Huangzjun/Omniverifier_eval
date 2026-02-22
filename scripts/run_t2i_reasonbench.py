@@ -149,7 +149,7 @@ def main():
     eval_cfg = bench_cfg.get("evaluation", {})
     evaluator = build_evaluator(
         "t2i_reasonbench",
-        model_path=eval_cfg.get("judge_model", "Qwen/Qwen2.5-VL-7B-Instruct"),
+        model_path=eval_cfg.get("judge_model", "Qwen/Qwen2.5-VL-72B-Instruct"),
     )
     evaluator.load()
 

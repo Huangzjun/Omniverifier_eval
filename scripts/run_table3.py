@@ -146,10 +146,12 @@ def run_step0_generation(
     output_dir: Path,
     logger,
     batch_size: int = 4,
+    num_workers: int = 1,
 ) -> dict[str, Image.Image]:
     """Generate step-0 images for a condition.
 
-    For diffusion models, generates in batches of `batch_size` for speed.
+    For diffusion models, generates in batches of `batch_size` for GPU parallelism.
+    For API-based generators, uses `num_workers` threads for concurrent requests.
     Already-generated images are skipped automatically.
     """
     images_dir = ensure_dir(output_dir / f"cond{cond.id}_{cond.generator}" / "images")
@@ -188,6 +190,34 @@ def run_step0_generation(
                         save_image(result.image, images_dir / f"{sample.id}.png")
                     except Exception as e2:
                         logger.error(f"  [{cond.name}] Generation failed for {sample.id}: {e2}")
+    elif num_workers > 1:
+        # Concurrent API requests via thread pool
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+
+        logger.info(f"  [{cond.name}] Parallel API mode (workers={num_workers})")
+        pbar = tqdm(total=len(pending), desc=f"Gen {cond.name} (workers={num_workers})")
+        lock = threading.Lock()
+
+        def _generate_one(sample):
+            img_path = images_dir / f"{sample.id}.png"
+            if img_path.exists():
+                return sample.id, True
+            try:
+                result = generator.generate(sample.prompt)
+                save_image(result.image, img_path)
+                return sample.id, True
+            except Exception as e:
+                logger.error(f"  [{cond.name}] Generation failed for {sample.id}: {e}")
+                return sample.id, False
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(_generate_one, s): s for s in pending}
+            for future in as_completed(futures):
+                future.result()
+                with lock:
+                    pbar.update(1)
+        pbar.close()
     else:
         for sample in tqdm(pending, desc=f"Gen {cond.name}"):
             try:
@@ -410,6 +440,10 @@ def parse_args():
         "--batch_size", type=int, default=4,
         help="Batch size for diffusion model generation (default: 4)."
     )
+    parser.add_argument(
+        "--num_workers", type=int, default=1,
+        help="Number of parallel workers for API-based generators (default: 1)."
+    )
     return parser.parse_args()
 
 
@@ -487,7 +521,7 @@ def main():
             if c.id not in needed_step0:
                 continue
             logger.info(f"\n  Condition {c.id}: {c.name}")
-            images = run_step0_generation(c, samples, bench_dir, logger, batch_size=args.batch_size)
+            images = run_step0_generation(c, samples, bench_dir, logger, batch_size=args.batch_size, num_workers=args.num_workers)
             step0_cache[c.id] = images
 
         # ── Phase 2: Run TTS loops ───────────────────────────────

@@ -1,4 +1,5 @@
 # T2I-ReasonBench evaluation config
+# Aligned with the official protocol: https://github.com/KaiyueSun98/T2I-ReasonBench
 benchmark: "t2i_reasonbench"
 
 data:
@@ -11,7 +12,9 @@ data:
     - "scientific_reasoning"
 
 evaluation:
-  judge_model: "Qwen/Qwen2.5-VL-7B-Instruct"
-  # Two-stage evaluation: LLM generates QA pairs, MLLM scores image
+  # Official protocol uses Qwen2.5-VL-72B-Instruct as MLLM judge
+  judge_model: "Qwen/Qwen2.5-VL-72B-Instruct"
+  # Two-stage: LLM generates QA pairs (pre-computed), MLLM scores 0/0.5/1
   scoring: "two_stage"
-  max_score: 10
+  # Per-criterion scores are 0, 0.5, or 1 (not 0-10)
+  score_levels: [0, 0.5, 1]

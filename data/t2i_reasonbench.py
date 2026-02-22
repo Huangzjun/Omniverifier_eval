@@ -26,6 +26,14 @@ DIMENSION_MAP = {
     "scientific_reasoning": "Scientific Reasoning",
 }
 
+# The official repo names eval JSON files differently from the dimension keys.
+EVAL_FILE_MAP = {
+    "idiom_interpretation": "evaluation_idiom.json",
+    "textual_image_design": "evaluation_textual_image.json",
+    "entity_reasoning": "evaluation_entity.json",
+    "scientific_reasoning": "evaluation_scientific.json",
+}
+
 
 class T2IReasonBenchDataset(BaseDataset):
     """Loader for T2I-ReasonBench benchmark."""
@@ -47,7 +55,13 @@ class T2IReasonBenchDataset(BaseDataset):
 
         for dim in self.dimensions:
             prompt_file = self.prompts_dir / f"{dim}.json"
-            eval_file = self.eval_questions_dir / f"{dim}.json"
+
+            # Eval QA files use a different naming convention in the official repo
+            eval_filename = EVAL_FILE_MAP.get(dim, f"{dim}.json")
+            eval_file = self.eval_questions_dir / eval_filename
+            # Fallback: try the dimension-key name directly
+            if not eval_file.exists():
+                eval_file = self.eval_questions_dir / f"{dim}.json"
 
             if not prompt_file.exists():
                 raise FileNotFoundError(
@@ -59,14 +73,12 @@ class T2IReasonBenchDataset(BaseDataset):
             with open(prompt_file, "r") as f:
                 prompts = json.load(f)
 
-            # Load evaluation question-criteria pairs if available
-            eval_data = {}
+            eval_data: list | dict = {}
             if eval_file.exists():
                 with open(eval_file, "r") as f:
                     eval_data = json.load(f)
 
             for idx, prompt_entry in enumerate(prompts):
-                # Handle both list-of-strings and list-of-dicts formats
                 if isinstance(prompt_entry, str):
                     prompt_text = prompt_entry
                 elif isinstance(prompt_entry, dict):
@@ -75,13 +87,12 @@ class T2IReasonBenchDataset(BaseDataset):
                     continue
                 sample_id = f"{dim}_{idx:04d}"
 
-                # Attach evaluation QA pairs
-                metadata = {
+                metadata: dict = {
+                    "dimension_key": dim,
                     "dimension_full_name": DIMENSION_MAP.get(dim, dim),
                     "index": idx,
                 }
                 if eval_data:
-                    # eval_data is typically keyed by prompt or index
                     if isinstance(eval_data, list) and idx < len(eval_data):
                         metadata["eval_questions"] = eval_data[idx]
                     elif isinstance(eval_data, dict):
