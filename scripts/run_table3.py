@@ -444,6 +444,10 @@ def parse_args():
         "--num_workers", type=int, default=1,
         help="Number of parallel workers for API-based generators (default: 1)."
     )
+    parser.add_argument(
+        "--generate_only", action="store_true",
+        help="Only run image generation (Phase 1 & 2), skip evaluation."
+    )
     return parser.parse_args()
 
 
@@ -496,11 +500,13 @@ def main():
             samples = samples[: args.num_samples]
         logger.info(f"  Loaded {len(samples)} samples")
 
-        # Load evaluator
-        evaluator = build_evaluator(benchmark)
-        evaluator.load()
-
         bench_dir = ensure_dir(output_dir / benchmark)
+
+        # Load evaluator (skip if generate_only)
+        evaluator = None
+        if not args.generate_only:
+            evaluator = build_evaluator(benchmark)
+            evaluator.load()
 
         # Storage for step-0 images (shared between conditions)
         step0_cache: dict[int, dict[str, Image.Image]] = {}
@@ -547,38 +553,42 @@ def main():
             final_images = run_tts_loop(c, samples, source_images, bench_dir, logger)
             tts_images[c.id] = final_images
 
-        # ── Phase 3: Evaluate all conditions ─────────────────────
-        logger.info("\n── Phase 3: Evaluation ──")
+        if args.generate_only:
+            total_imgs = sum(len(step0_cache.get(c.id, {})) for c in run_conds if c.id in step0_cache)
+            logger.info(f"\n── --generate_only: skipping evaluation. {total_imgs} images generated. ──")
+        else:
+            # ── Phase 3: Evaluate all conditions ─────────────────────
+            logger.info("\n── Phase 3: Evaluation ──")
 
-        for c in run_conds:
-            logger.info(f"\n  Evaluating condition {c.id}: {c.name}")
+            for c in run_conds:
+                logger.info(f"\n  Evaluating condition {c.id}: {c.name}")
 
-            # Pick the right images
-            if c.verifier is None:
-                images = step0_cache.get(c.id, {})
-            else:
-                images = tts_images.get(c.id, {})
+                # Pick the right images
+                if c.verifier is None:
+                    images = step0_cache.get(c.id, {})
+                else:
+                    images = tts_images.get(c.id, {})
 
-            if not images:
-                logger.error(f"    No images available for condition {c.id}")
-                continue
+                if not images:
+                    logger.error(f"    No images available for condition {c.id}")
+                    continue
 
-            result = evaluate_images(
-                c, benchmark, samples, images, bench_dir, evaluator, logger,
+                result = evaluate_images(
+                    c, benchmark, samples, images, bench_dir, evaluator, logger,
+                )
+                all_results[c.id] = result
+
+                overall = result.get("scores", {}).get("overall", 0)
+                logger.info(f"    → Overall: {overall:.1f}%")
+
+            # ── Print Table 3 ────────────────────────────────────────
+            print_table3(all_results, benchmark, logger)
+
+            # Save full results
+            save_json(
+                {str(k): v for k, v in all_results.items()},
+                bench_dir / "table3_results.json",
             )
-            all_results[c.id] = result
-
-            overall = result.get("scores", {}).get("overall", 0)
-            logger.info(f"    → Overall: {overall:.1f}%")
-
-        # ── Print Table 3 ────────────────────────────────────────
-        print_table3(all_results, benchmark, logger)
-
-        # Save full results
-        save_json(
-            {str(k): v for k, v in all_results.items()},
-            bench_dir / "table3_results.json",
-        )
 
     logger.info(f"\n✅ All done. Results saved to {output_dir}")
 

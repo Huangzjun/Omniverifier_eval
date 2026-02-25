@@ -139,7 +139,7 @@ class BAGELGenerator(BaseGenerator):
 
     def __init__(
         self,
-        model_path: str = "ByteDance-Seed/BAGEL-7B-MoT",
+        model_path: str = "models/bagel-7b",
         device: str = "cuda",
         torch_dtype: str = "bfloat16",
         use_thinking: bool = True,
@@ -162,16 +162,35 @@ class BAGELGenerator(BaseGenerator):
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
 
+        # The project has its own `data` package at the repo root which
+        # shadows `bagel_repo/data`.  Temporarily evict all cached `data.*`
+        # entries so the imports below resolve against bagel_repo.
+        _saved_data_modules = {
+            k: sys.modules.pop(k)
+            for k in list(sys.modules)
+            if k == "data" or k.startswith("data.")
+        }
+
         print(f"[BAGEL] Loading model from {self.model_path} ...")
 
-        from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
-        from data.data_utils import add_special_tokens
-        from data.transforms import ImageTransform
-        from inferencer import InterleaveInferencer
-        from modeling.autoencoder import load_ae
-        from modeling.bagel import BagelConfig, Bagel, Qwen2Config, Qwen2ForCausalLM
-        from modeling.bagel import SiglipVisionConfig, SiglipVisionModel
-        from modeling.qwen2 import Qwen2Tokenizer
+        try:
+            from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch, init_empty_weights
+            from data.data_utils import add_special_tokens
+            from data.transforms import ImageTransform
+            from inferencer import InterleaveInferencer
+            from modeling.autoencoder import load_ae
+            from modeling.bagel import BagelConfig, Bagel, Qwen2Config, Qwen2ForCausalLM
+            from modeling.bagel import SiglipVisionConfig, SiglipVisionModel
+            from modeling.qwen2 import Qwen2Tokenizer
+        finally:
+            # Restore the project-level `data` package so the rest of the
+            # codebase keeps working.
+            bagel_data_modules = {
+                k: sys.modules.pop(k)
+                for k in list(sys.modules)
+                if k == "data" or k.startswith("data.")
+            }
+            sys.modules.update(_saved_data_modules)
 
         llm_config = Qwen2Config.from_json_file(os.path.join(self.model_path, "llm_config.json"))
         llm_config.qk_norm = True
@@ -240,7 +259,7 @@ class BAGELGenerator(BaseGenerator):
             text=prompt,
             think=self.use_thinking,
             cfg_text_scale=kwargs.get("cfg_text_scale", 4.0),
-            cfg_img_scale=kwargs.get("cfg_img_scale", 1.5),
+            cfg_img_scale=kwargs.get("cfg_img_scale", 1.0),
             cfg_interval=kwargs.get("cfg_interval", [0.4, 1.0]),
             timestep_shift=kwargs.get("timestep_shift", 3.0),
             num_timesteps=kwargs.get("num_timesteps", 50),

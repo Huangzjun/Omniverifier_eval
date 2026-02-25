@@ -109,7 +109,7 @@ class T2IReasonBenchEvaluator(BaseEvaluator):
         model_path: str = "Qwen/Qwen2.5-VL-72B-Instruct",
         device: str = "cuda",
         torch_dtype: str = "auto",
-        quantization: str | None = "int8",
+        quantization: str | None = "int4",
     ):
         super().__init__(name="t2i_reasonbench")
         self.model_path = model_path
@@ -320,7 +320,6 @@ class T2IReasonBenchEvaluator(BaseEvaluator):
             output_ids = self._model.generate(
                 **inputs,
                 max_new_tokens=1000,
-                do_sample=False,
             )
 
         trimmed = [
