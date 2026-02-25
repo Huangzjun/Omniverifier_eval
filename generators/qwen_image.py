@@ -161,8 +161,7 @@ class OpenAIImageGenerator(BaseGenerator):
             n=1,
             size="1024x1024",
         )
-        image_url = response.data[0].url
-        image = self._download_image(image_url)
+        image = self._extract_image(response.data[0])
         return GenerationResult(image=image, prompt=prompt)
 
     def edit(self, image: Image.Image, original_prompt: str, edit_instruction: str, **kwargs) -> GenerationResult:
@@ -180,8 +179,7 @@ class OpenAIImageGenerator(BaseGenerator):
             n=1,
             size="1024x1024",
         )
-        image_url = response.data[0].url
-        edited_image = self._download_image(image_url)
+        edited_image = self._extract_image(response.data[0])
         return GenerationResult(
             image=edited_image,
             prompt=edit_instruction,
@@ -189,8 +187,16 @@ class OpenAIImageGenerator(BaseGenerator):
         )
 
     @staticmethod
-    def _download_image(url: str) -> Image.Image:
-        import requests
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        return Image.open(io.BytesIO(response.content)).convert("RGB")
+    def _extract_image(data) -> Image.Image:
+        """Extract image from API response (supports both URL and base64)."""
+        if data.b64_json:
+            import base64
+            img_bytes = base64.b64decode(data.b64_json)
+            return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        elif data.url:
+            import requests
+            resp = requests.get(data.url, timeout=60)
+            resp.raise_for_status()
+            return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        else:
+            raise ValueError("API response contains neither b64_json nor url")
