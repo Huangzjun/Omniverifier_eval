@@ -1,17 +1,20 @@
 """OmniVerifier-7B: Generative Universal Verifier.
 
 This module wraps the OmniVerifier-7B model (Qwen2.5-VL-7B fine-tuned via RL)
-for image-prompt alignment verification. The model outputs:
-1. A binary judgment: "yes" (aligned) or "no" (misaligned)
-2. An explanation of misalignment + edit instruction
+for image-prompt alignment verification.
 
-The OmniVerifier serves as the "misalignment-finder" in the TTS pipeline.
+The verification output is a JSON object:
+  {"answer": true/false, "explanation": "...", "edit_prompt": "..."}
+
+The model uses <think>...</think> tags for chain-of-thought reasoning,
+and the JSON answer follows after the closing </think> tag.
 
 Model: https://huggingface.co/comin/OmniVerifier-7B
+Reference: https://github.com/Cominclip/OmniVerifier/blob/main/sequential_omniverifier_tts.py
 """
 from __future__ import annotations
 
-import re
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,21 +25,66 @@ from PIL import Image
 @dataclass
 class VerificationResult:
     """Result from OmniVerifier verification."""
-    is_aligned: bool            # Whether the image is aligned with the prompt
-    explanation: str             # Explanation of the verification result
-    edit_instruction: str        # If misaligned, suggested edit instruction
-    raw_output: str              # Raw model output
-    confidence: float = 0.0     # Optional confidence score
+    is_aligned: bool
+    explanation: str
+    edit_instruction: str
+    raw_output: str
+    confidence: float = 0.0
 
 
-# The system prompt used by OmniVerifier for verification
-VERIFICATION_PROMPT = (
-    "You are a professional image evaluator. Given an image and a text prompt, "
-    "you need to determine whether the image is strictly aligned with the prompt. "
-    "Please first provide your analysis, then give your final answer as 'yes' or 'no'. "
-    "If the answer is 'no', please also provide a specific edit instruction "
-    "describing what should be changed to make the image aligned with the prompt."
+SYS_PROMPT = (
+    " You should first think about the reasoning process in the mind "
+    "and then provide the user with the answer. The reasoning process "
+    "is enclosed within <think> </think> tags, i.e., "
+    "<think> reasoning process here </think> answer here"
 )
+
+
+def _build_verification_question(prompt: str) -> str:
+    """Build the verification question exactly matching the official repo."""
+    return (
+        f"This image was generated from the prompt: {prompt}. \n"
+        " Please carefully analyze the image and determine whether all the "
+        "objects, attributes, and spatial relationships mentioned in the prompt "
+        "are correctly represented in the image. \n\n"
+        " If the image accurately reflects the prompt, please answer 'true'; "
+        "otherwise, answer 'false'. \n\n"
+        " When the answer is false, you must:\n"
+        " 1. Identify the main error and describe it briefly in \"explanation\".\n"
+        " 2. In \"edit_prompt\", provide a **concrete image editing instruction** to fix the error. \n"
+        " - The instruction must specify the exact action (e.g., add / remove / replace / move). \n"
+        " - The instruction must specify the location or reference point "
+        "(e.g., \"delete the bottle in the bottom-right corner\", "
+        "\"add a dog next to the left pillar\"). \n"
+        " - Do not give vague instructions such as \"add more bottles\" "
+        "or \"ensure the count is correct\". Be precise and actionable. \n\n"
+        " Respond strictly in the following JSON format: \n\n"
+        " {\n"
+        " \"answer\": true/false,\n"
+        " \"explanation\": \"If the answer is false, briefly summarize the main error.\",\n"
+        " \"edit_prompt\": \"If the answer is false, provide a concrete and "
+        "location-specific editing instruction.\"\n"
+        " }\n"
+    )
+
+
+def _parse_verification_output(raw_output: str) -> tuple[bool, str, str]:
+    """Parse the verification output (with <think> tags and JSON).
+
+    Returns (is_aligned, explanation, edit_prompt).
+    """
+    try:
+        if "</think>" in raw_output:
+            json_str = raw_output.split("</think>")[1].strip()
+        else:
+            json_str = raw_output.strip()
+        output_json = json.loads(json_str)
+        answer = output_json.get("answer", False)
+        explanation = output_json.get("explanation", "")
+        edit_prompt = output_json.get("edit_prompt", "remain unchanged")
+        return bool(answer), explanation, edit_prompt
+    except (json.JSONDecodeError, IndexError, TypeError):
+        return False, "", "remain unchanged"
 
 
 class OmniVerifier:
@@ -52,7 +100,7 @@ class OmniVerifier:
         model_path: str = "comin/OmniVerifier-7B",
         device: str = "cuda",
         torch_dtype: str = "bfloat16",
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 2048,
         use_vllm: bool = False,
     ):
         self.model_path = model_path
@@ -103,49 +151,44 @@ class OmniVerifier:
         print("[OmniVerifier] vLLM model loaded successfully")
 
     def verify(self, image: Image.Image, prompt: str) -> VerificationResult:
-        """Verify whether an image is aligned with a text prompt.
-
-        Args:
-            image: The generated image to verify.
-            prompt: The original text prompt.
-
-        Returns:
-            VerificationResult with alignment judgment and edit instruction.
-        """
+        """Verify whether an image is aligned with a text prompt."""
         if self.use_vllm:
             raw_output = self._infer_vllm(image, prompt)
         else:
             raw_output = self._infer_transformers(image, prompt)
 
-        return self._parse_output(raw_output)
+        is_aligned, explanation, edit_prompt = _parse_verification_output(raw_output)
+
+        return VerificationResult(
+            is_aligned=is_aligned,
+            explanation=explanation,
+            edit_instruction=edit_prompt,
+            raw_output=raw_output,
+        )
 
     def _infer_transformers(self, image: Image.Image, prompt: str) -> str:
-        """Run inference using transformers."""
+        """Run inference using transformers.
+
+        Matches the official repo: single user message with
+        (question + SYS_PROMPT), no system role.
+        """
+        question = _build_verification_question(prompt)
+
         messages = [
-            {
-                "role": "system",
-                "content": VERIFICATION_PROMPT,
-            },
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Please check if this image strictly matches the following prompt:\n"
-                            f'"{prompt}"\n\n'
-                            f"Analyze the image carefully and provide your judgment."
-                        ),
-                    },
+                    {"type": "text", "text": question + SYS_PROMPT},
                 ],
             },
         ]
 
-        # Prepare inputs
         from qwen_vl_utils import process_vision_info
 
-        text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text = self._processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
         image_inputs, video_inputs = process_vision_info(messages)
 
         inputs = self._processor(
@@ -156,113 +199,37 @@ class OmniVerifier:
             return_tensors="pt",
         ).to(self._model.device)
 
-        with torch.no_grad():
-            output_ids = self._model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=False,
-            )
-
-        # Decode only new tokens
-        generated_ids = output_ids[:, inputs.input_ids.shape[1]:]
-        output_text = self._processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        return output_text.strip()
+        generated_ids = self._model.generate(
+            **inputs,
+            max_new_tokens=self.max_new_tokens,
+        )
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):]
+            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_text = self._processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        return output_text[0]
 
     def _infer_vllm(self, image: Image.Image, prompt: str) -> str:
         """Run inference using vLLM."""
-        from vllm import SamplingParams
-
-        user_text = (
-            f"Please check if this image strictly matches the following prompt:\n"
-            f'"{prompt}"\n\n'
-            f"Analyze the image carefully and provide your judgment."
-        )
+        question = _build_verification_question(prompt)
 
         messages = [
-            {"role": "system", "content": VERIFICATION_PROMPT},
             {
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": self._pil_to_data_url(image)}},
-                    {"type": "text", "text": user_text},
+                    {"type": "text", "text": question + SYS_PROMPT},
                 ],
             },
         ]
 
         outputs = self._model.chat(messages, sampling_params=self._sampling_params)
-        return outputs[0].outputs[0].text.strip()
-
-    def _parse_output(self, raw_output: str) -> VerificationResult:
-        """Parse the model output into structured VerificationResult.
-
-        The model typically outputs analysis followed by a conclusion containing
-        'yes' or 'no', and if 'no', an edit instruction.
-        """
-        text_lower = raw_output.lower().strip()
-
-        # Determine alignment - look for final answer
-        # Common patterns: "Final answer: yes/no", "my answer is yes/no",
-        # or simply ending with "yes"/"no"
-        is_aligned = False
-
-        # Check for explicit answer patterns
-        answer_patterns = [
-            r"final\s*answer\s*[:：]\s*(yes|no)",
-            r"my\s*(?:final\s*)?answer\s*(?:is\s*)[:：]?\s*(yes|no)",
-            r"(?:the\s*)?answer\s*[:：]\s*(yes|no)",
-            r"\*\*(yes|no)\*\*",
-        ]
-
-        for pattern in answer_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                is_aligned = match.group(1) == "yes"
-                break
-        else:
-            # Fallback: check if the last line contains yes/no
-            last_lines = text_lower.split("\n")[-3:]
-            last_text = " ".join(last_lines)
-            if "yes" in last_text and "no" not in last_text:
-                is_aligned = True
-            elif "no" in last_text:
-                is_aligned = False
-
-        # Extract edit instruction if misaligned
-        edit_instruction = ""
-        if not is_aligned:
-            edit_instruction = self._extract_edit_instruction(raw_output)
-
-        return VerificationResult(
-            is_aligned=is_aligned,
-            explanation=raw_output,
-            edit_instruction=edit_instruction,
-            raw_output=raw_output,
-        )
-
-    @staticmethod
-    def _extract_edit_instruction(raw_output: str) -> str:
-        """Extract the edit instruction from the verification output."""
-        # Look for common edit instruction patterns
-        patterns = [
-            r"edit\s*instruction\s*[:：]\s*(.+?)(?:\n|$)",
-            r"should\s*be\s*(?:changed|modified|edited)\s*(?:to|by)\s*[:：]?\s*(.+?)(?:\n|$)",
-            r"suggestion\s*[:：]\s*(.+?)(?:\n|$)",
-            r"to\s*fix\s*this\s*[:：,]?\s*(.+?)(?:\n|$)",
-            r"recommendation\s*[:：]\s*(.+?)(?:\n|$)",
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, raw_output, re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-
-        # Fallback: use the last substantial sentence as the edit instruction
-        sentences = [s.strip() for s in raw_output.split(".") if len(s.strip()) > 20]
-        if sentences:
-            # Return the last few sentences as they often contain the correction
-            return ". ".join(sentences[-2:]).strip()
-
-        return raw_output.strip()[-200:]  # Last 200 chars as fallback
+        return outputs[0].outputs[0].text
 
     @staticmethod
     def _pil_to_data_url(image: Image.Image) -> str:

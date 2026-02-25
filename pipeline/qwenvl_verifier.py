@@ -5,18 +5,21 @@ In Table 3 of the paper:
   - QwenVL-TTS uses this vanilla verifier
   - OmniVerifier-TTS uses the RL-finetuned OmniVerifier-7B
 
-Both follow the same sequential verify→edit loop, the only difference
-is which model performs the verification + edit instruction extraction.
+Both follow the same sequential verify-then-edit loop; the only difference
+is which model performs the verification.  Prompt format and parsing
+are shared via the helpers in pipeline.omniverifier.
 """
 from __future__ import annotations
-
-import re
-from dataclasses import dataclass
 
 import torch
 from PIL import Image
 
-from pipeline.omniverifier import VerificationResult, VERIFICATION_PROMPT
+from pipeline.omniverifier import (
+    VerificationResult,
+    SYS_PROMPT,
+    _build_verification_question,
+    _parse_verification_output,
+)
 
 
 class QwenVLVerifier:
@@ -31,7 +34,7 @@ class QwenVLVerifier:
         model_path: str = "Qwen/Qwen2.5-VL-7B-Instruct",
         device: str = "cuda",
         torch_dtype: str = "bfloat16",
-        max_new_tokens: int = 1024,
+        max_new_tokens: int = 2048,
     ):
         self.model_path = model_path
         self.device = device
@@ -54,33 +57,31 @@ class QwenVLVerifier:
         print("[QwenVL-Verifier] Model loaded successfully")
 
     def verify(self, image: Image.Image, prompt: str) -> VerificationResult:
-        """Verify image-prompt alignment using vanilla Qwen2.5-VL.
-
-        Returns the same VerificationResult as OmniVerifier for
-        seamless interchangeability in the TTS pipeline.
-        """
+        """Verify image-prompt alignment using vanilla Qwen2.5-VL."""
         raw_output = self._infer(image, prompt)
-        return self._parse_output(raw_output)
+        is_aligned, explanation, edit_prompt = _parse_verification_output(raw_output)
+
+        return VerificationResult(
+            is_aligned=is_aligned,
+            explanation=explanation,
+            edit_instruction=edit_prompt,
+            raw_output=raw_output,
+        )
 
     def _infer(self, image: Image.Image, prompt: str) -> str:
-        """Run inference using transformers."""
+        """Run inference using transformers.
+
+        Uses the same prompt format as OmniVerifier: single user
+        message with (question + SYS_PROMPT), no system role.
+        """
+        question = _build_verification_question(prompt)
+
         messages = [
-            {
-                "role": "system",
-                "content": VERIFICATION_PROMPT,
-            },
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Please check if this image strictly matches the following prompt:\n"
-                            f'"{prompt}"\n\n'
-                            f"Analyze the image carefully and provide your judgment."
-                        ),
-                    },
+                    {"type": "text", "text": question + SYS_PROMPT},
                 ],
             },
         ]
@@ -100,72 +101,17 @@ class QwenVLVerifier:
             return_tensors="pt",
         ).to(self._model.device)
 
-        with torch.no_grad():
-            output_ids = self._model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=False,
-            )
-
-        generated_ids = output_ids[:, inputs.input_ids.shape[1]:]
-        output_text = self._processor.batch_decode(
-            generated_ids, skip_special_tokens=True
-        )[0]
-        return output_text.strip()
-
-    def _parse_output(self, raw_output: str) -> VerificationResult:
-        """Parse output — identical logic to OmniVerifier._parse_output."""
-        text_lower = raw_output.lower().strip()
-        is_aligned = False
-
-        answer_patterns = [
-            r"final\s*answer\s*[:：]\s*(yes|no)",
-            r"my\s*(?:final\s*)?answer\s*(?:is\s*)[:：]?\s*(yes|no)",
-            r"(?:the\s*)?answer\s*[:：]\s*(yes|no)",
-            r"\*\*(yes|no)\*\*",
-        ]
-
-        for pattern in answer_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                is_aligned = match.group(1) == "yes"
-                break
-        else:
-            last_lines = text_lower.split("\n")[-3:]
-            last_text = " ".join(last_lines)
-            if "yes" in last_text and "no" not in last_text:
-                is_aligned = True
-            elif "no" in last_text:
-                is_aligned = False
-
-        edit_instruction = ""
-        if not is_aligned:
-            edit_instruction = self._extract_edit_instruction(raw_output)
-
-        return VerificationResult(
-            is_aligned=is_aligned,
-            explanation=raw_output,
-            edit_instruction=edit_instruction,
-            raw_output=raw_output,
+        generated_ids = self._model.generate(
+            **inputs,
+            max_new_tokens=self.max_new_tokens,
         )
-
-    @staticmethod
-    def _extract_edit_instruction(raw_output: str) -> str:
-        """Extract edit instruction from verification output."""
-        patterns = [
-            r"edit\s*instruction\s*[:：]\s*(.+?)(?:\n|$)",
-            r"should\s*be\s*(?:changed|modified|edited)\s*(?:to|by)\s*[:：]?\s*(.+?)(?:\n|$)",
-            r"suggestion\s*[:：]\s*(.+?)(?:\n|$)",
-            r"to\s*fix\s*this\s*[:：,]?\s*(.+?)(?:\n|$)",
-            r"recommendation\s*[:：]\s*(.+?)(?:\n|$)",
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):]
+            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]
-
-        for pattern in patterns:
-            match = re.search(pattern, raw_output, re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
-
-        sentences = [s.strip() for s in raw_output.split(".") if len(s.strip()) > 20]
-        if sentences:
-            return ". ".join(sentences[-2:]).strip()
-        return raw_output.strip()[-200:]
+        output_text = self._processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )
+        return output_text[0]

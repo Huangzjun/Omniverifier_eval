@@ -62,7 +62,7 @@ class SequentialTTS:
         self,
         verifier: OmniVerifier,
         generator: BaseGenerator,
-        max_rounds: int = 3,
+        max_rounds: int = 9,
         early_stop: bool = True,
         save_intermediates: bool = True,
         output_dir: str = "results/tts",

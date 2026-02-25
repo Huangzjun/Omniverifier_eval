@@ -4,7 +4,7 @@ model:
     model_path: "comin/OmniVerifier-7B"
     device: "cuda"
     torch_dtype: "bfloat16"
-    max_new_tokens: 1024
+    max_new_tokens: 2048
     use_vllm: false
     # Set true + provide local path for faster inference
     # use_vllm: true
@@ -16,7 +16,7 @@ model:
     torch_dtype: "bfloat16"
 
 pipeline:
-  max_rounds: 3          # Number of sequential refinement rounds
+  max_rounds: 9          # 9 refinement rounds = 10 total steps (matching official max_steps=10)
   early_stop: true       # Stop if OmniVerifier says "yes" (aligned)
   save_intermediates: true
 

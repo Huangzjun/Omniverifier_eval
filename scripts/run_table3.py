@@ -86,10 +86,10 @@ CONDITIONS = [
     Condition(id=5,  name="Qwen-Image",                    generator="qwen_image", verifier=None),
     Condition(id=6,  name="GPT-Image-1",                   generator="gpt_image",  verifier=None),
     # ── TTS loop conditions ──────────────────────────────────────
-    Condition(id=7,  name="QwenVL-TTS (Qwen-Image)",       generator="qwen_image", verifier="qwenvl",       tts_rounds=3, step0_from=5),
-    Condition(id=8,  name="OmniVerifier-TTS (Qwen-Image)", generator="qwen_image", verifier="omniverifier", tts_rounds=3, step0_from=5),
-    Condition(id=9,  name="QwenVL-TTS (GPT-Image-1)",      generator="gpt_image",  verifier="qwenvl",       tts_rounds=3, step0_from=6),
-    Condition(id=10, name="OmniVerifier-TTS (GPT-Image-1)",generator="gpt_image",  verifier="omniverifier", tts_rounds=3, step0_from=6),
+    Condition(id=7,  name="QwenVL-TTS (Qwen-Image)",       generator="qwen_image", verifier="qwenvl",       tts_rounds=9, step0_from=5),
+    Condition(id=8,  name="OmniVerifier-TTS (Qwen-Image)", generator="qwen_image", verifier="omniverifier", tts_rounds=9, step0_from=5),
+    Condition(id=9,  name="QwenVL-TTS (GPT-Image-1)",      generator="gpt_image",  verifier="qwenvl",       tts_rounds=9, step0_from=6),
+    Condition(id=10, name="OmniVerifier-TTS (GPT-Image-1)",generator="gpt_image",  verifier="omniverifier", tts_rounds=9, step0_from=6),
 ]
 # fmt: on
 
@@ -433,8 +433,8 @@ def parse_args():
         help="Limit samples for debugging (-1 = all)."
     )
     parser.add_argument(
-        "--tts_rounds", type=int, default=3,
-        help="Max TTS rounds for conditions 7-10."
+        "--tts_rounds", type=int, default=9,
+        help="Max TTS refinement rounds for conditions 7-10 (9 rounds = 10 total steps)."
     )
     parser.add_argument(
         "--batch_size", type=int, default=4,
