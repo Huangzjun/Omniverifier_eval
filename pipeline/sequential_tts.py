@@ -273,5 +273,6 @@ class SequentialTTS:
             "edit_instruction": step.edit_instruction,
             "generation_time": step.generation_time,
             "verification_time": step.verification_time,
+            "raw_output": step.verification.raw_output,
         }
         save_json(meta, step_dir / f"step_{step.step}_meta.json")

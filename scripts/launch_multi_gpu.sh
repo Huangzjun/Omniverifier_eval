@@ -8,7 +8,7 @@ CONDITION=${2:-8}
 shift 2 2>/dev/null
 EXTRA_ARGS="$@"
 
-LOG_DIR="results/table3"
+LOG_DIR="results/table3/logs/cond${CONDITION}"
 mkdir -p "$LOG_DIR"
 
 echo "============================================="
@@ -20,7 +20,7 @@ echo "============================================="
 
 PIDS=()
 for SHARD_ID in $(seq 0 $((NUM_GPUS - 1))); do
-    LOG_FILE="${LOG_DIR}/cond${CONDITION}_shard${SHARD_ID}.log"
+    LOG_FILE="${LOG_DIR}/shard${SHARD_ID}.log"
 
     echo "[GPU $SHARD_ID] Starting shard $SHARD_ID / $NUM_GPUS → $LOG_FILE"
 

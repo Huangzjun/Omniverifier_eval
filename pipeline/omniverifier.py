@@ -15,6 +15,7 @@ Reference: https://github.com/Cominclip/OmniVerifier/blob/main/sequential_omnive
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -71,15 +72,39 @@ def _build_verification_question(prompt: str) -> str:
 def _parse_verification_output(raw_output: str) -> tuple[bool, str, str]:
     """Parse the verification output (with <think> tags and JSON).
 
+    Handles multiple output formats:
+    1. <think>...</think> { JSON }          (OmniVerifier-7B style)
+    2. ```json\n{ JSON }\n```              (markdown code block)
+    3. Raw JSON string                      (plain JSON)
+    4. JSON embedded in natural language     (regex extraction)
+
     Returns (is_aligned, explanation, edit_prompt).
     """
     try:
-        if "</think>" in raw_output:
-            json_str = raw_output.split("</think>")[1].strip()
-        else:
-            json_str = raw_output.strip()
-        output_json = json.loads(json_str)
+        # Strip <think> block if present
+        text = raw_output
+        if "</think>" in text:
+            text = text.split("</think>")[1].strip()
+
+        # Try direct JSON parse first
+        try:
+            output_json = json.loads(text)
+        except json.JSONDecodeError:
+            # Strip markdown code block markers: ```json ... ``` or ``` ... ```
+            stripped = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+            try:
+                output_json = json.loads(stripped)
+            except json.JSONDecodeError:
+                # Last resort: find first { ... } block via regex
+                match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+                if match:
+                    output_json = json.loads(match.group())
+                else:
+                    return False, "", "remain unchanged"
+
         answer = output_json.get("answer", False)
+        if isinstance(answer, str):
+            answer = answer.lower().strip() == "true"
         explanation = output_json.get("explanation", "")
         edit_prompt = output_json.get("edit_prompt", "remain unchanged")
         return bool(answer), explanation, edit_prompt
