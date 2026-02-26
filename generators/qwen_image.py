@@ -56,11 +56,15 @@ class QwenImageGenerator(BaseGenerator):
         from diffusers import QwenImageEditPipeline
 
         print(f"[QwenImage] Loading edit pipeline: {self.edit_model} ...")
-        self._edit_pipe = QwenImageEditPipeline.from_pretrained(self.edit_model)
-        self._edit_pipe.to(torch.bfloat16)
-        self._edit_pipe.to("cuda")
+        self._edit_pipe = QwenImageEditPipeline.from_pretrained(
+            self.edit_model,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+        )
+        self._edit_pipe.enable_attention_slicing()
+        self._edit_pipe.enable_vae_tiling()
         self._edit_pipe.set_progress_bar_config(disable=None)
-        print("[QwenImage] Edit pipeline loaded successfully")
+        print("[QwenImage] Edit pipeline loaded (on GPU, attention slicing + VAE tiling)")
 
     def generate(self, prompt: str, **kwargs) -> GenerationResult:
         """Generate an image from a text prompt using DashScope API."""
@@ -115,6 +119,7 @@ class QwenImageGenerator(BaseGenerator):
         as the prompt parameter.
         """
         self._ensure_edit_pipeline()
+        torch.cuda.empty_cache()
 
         result_image = self._edit_pipe(
             image=image.convert("RGB"),

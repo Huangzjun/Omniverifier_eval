@@ -276,9 +276,19 @@ def run_tts_loop(
         output_dir=str(tts_dir),
     )
 
-    # Run TTS on each sample
-    final_images = {}
+    # Load any already-completed final images for per-sample resumption
+    final_dir = tts_dir / "final"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    cached_finals = load_step0_images(final_dir) if final_dir.exists() else {}
+
+    # Run TTS on each sample (skip already finished ones)
+    final_images = dict(cached_finals)
+    skipped = 0
     for sample in tqdm(samples, desc=f"TTS {cond.name}"):
+        if sample.id in cached_finals:
+            skipped += 1
+            continue
+
         initial_image = step0_images.get(sample.id)
         if initial_image is None:
             logger.warning(f"  [{cond.name}] No step-0 image for {sample.id}, skipping")
@@ -293,8 +303,10 @@ def run_tts_loop(
             final_images[sample.id] = result.final_image
         except Exception as e:
             logger.error(f"  [{cond.name}] TTS failed for {sample.id}: {e}")
-            # Fallback: use step-0 image
             final_images[sample.id] = initial_image
+
+    if skipped:
+        logger.info(f"  [{cond.name}] Skipped {skipped} cached samples")
 
     logger.info(
         f"  [{cond.name}] TTS completed: {len(final_images)} / {len(samples)} samples"
@@ -448,6 +460,12 @@ def parse_args():
         "--generate_only", action="store_true",
         help="Only run image generation (Phase 1 & 2), skip evaluation."
     )
+    parser.add_argument(
+        "--eval_only", action="store_true",
+        help="Only run evaluation (Phase 3) on existing images, skip generation and TTS loops. "
+             "For TTS conditions (7-10), evaluates cached final images if available, "
+             "otherwise falls back to step-0 images from the source condition."
+    )
     return parser.parse_args()
 
 
@@ -512,45 +530,70 @@ def main():
         step0_cache: dict[int, dict[str, Image.Image]] = {}
         all_results: dict[int, dict] = {}
 
-        # ── Phase 1: Generate step-0 images ──────────────────────
-        logger.info("\n── Phase 1: Step-0 Generation ──")
+        if args.eval_only:
+            # ── eval_only: skip Phase 1 & 2, load existing images from disk ──
+            logger.info("\n── --eval_only: skipping Phase 1 & 2, using cached images ──")
 
-        # Determine which step-0 conditions are needed
-        needed_step0 = set()
-        for c in run_conds:
-            if c.step0_from is not None:
-                needed_step0.add(c.step0_from)
-            if c.verifier is None:
-                needed_step0.add(c.id)
+            tts_images: dict[int, dict[str, Image.Image]] = {}
+            for c in run_conds:
+                if c.verifier is None:
+                    # Step-0 condition: load from step-0 images dir
+                    images_dir = bench_dir / f"cond{c.id}_{c.generator}" / "images"
+                    step0_cache[c.id] = LazyImageDir(images_dir)
+                    logger.info(f"  Condition {c.id} ({c.name}): loaded {len(step0_cache[c.id])} cached step-0 images")
+                else:
+                    # TTS condition: try cached final images first, fall back to step-0
+                    tts_dir_name = f"cond{c.id}_{c.name.replace(' ', '_').replace('(', '').replace(')', '')}"
+                    final_dir = bench_dir / tts_dir_name / "final"
+                    if final_dir.exists() and len(list(final_dir.glob("*.png"))) > 0:
+                        tts_images[c.id] = LazyImageDir(final_dir)
+                        logger.info(f"  Condition {c.id} ({c.name}): loaded {len(tts_images[c.id])} cached TTS final images")
+                    else:
+                        # Fall back to step-0 images from source condition
+                        src = CONDITIONS_BY_ID[c.step0_from]
+                        fallback_dir = bench_dir / f"cond{src.id}_{src.generator}" / "images"
+                        tts_images[c.id] = LazyImageDir(fallback_dir)
+                        logger.info(f"  Condition {c.id} ({c.name}): no TTS final images, falling back to step-0 from cond {c.step0_from} ({len(tts_images[c.id])} images)")
+        else:
+            # ── Phase 1: Generate step-0 images ──────────────────────
+            logger.info("\n── Phase 1: Step-0 Generation ──")
 
-        for cid in sorted(needed_step0):
-            c = CONDITIONS_BY_ID[cid]
-            logger.info(f"\n  Condition {c.id}: {c.name}")
-            images = run_step0_generation(c, samples, bench_dir, logger, batch_size=args.batch_size, num_workers=args.num_workers)
-            step0_cache[c.id] = images
+            # Determine which step-0 conditions are needed
+            needed_step0 = set()
+            for c in run_conds:
+                if c.step0_from is not None:
+                    needed_step0.add(c.step0_from)
+                if c.verifier is None:
+                    needed_step0.add(c.id)
 
-        # ── Phase 2: Run TTS loops ───────────────────────────────
-        logger.info("\n── Phase 2: TTS Verify→Edit Loops ──")
+            for cid in sorted(needed_step0):
+                c = CONDITIONS_BY_ID[cid]
+                logger.info(f"\n  Condition {c.id}: {c.name}")
+                images = run_step0_generation(c, samples, bench_dir, logger, batch_size=args.batch_size, num_workers=args.num_workers)
+                step0_cache[c.id] = images
 
-        tts_images: dict[int, dict[str, Image.Image]] = {}
-        for c in run_conds:
-            if c.verifier is None:
-                continue  # skip step-0 only conditions
+            # ── Phase 2: Run TTS loops ───────────────────────────────
+            logger.info("\n── Phase 2: TTS Verify→Edit Loops ──")
 
-            logger.info(f"\n  Condition {c.id}: {c.name}")
-            logger.info(f"    Verifier:  {c.verifier}")
-            logger.info(f"    Generator: {c.generator}")
-            logger.info(f"    Rounds:    {c.tts_rounds}")
-            logger.info(f"    Step-0 from: condition {c.step0_from}")
+            tts_images: dict[int, dict[str, Image.Image]] = {}
+            for c in run_conds:
+                if c.verifier is None:
+                    continue  # skip step-0 only conditions
 
-            # Get step-0 images to seed the TTS loop
-            source_images = step0_cache.get(c.step0_from, {})
-            if not source_images:
-                logger.error(f"    No step-0 images from condition {c.step0_from}!")
-                continue
+                logger.info(f"\n  Condition {c.id}: {c.name}")
+                logger.info(f"    Verifier:  {c.verifier}")
+                logger.info(f"    Generator: {c.generator}")
+                logger.info(f"    Rounds:    {c.tts_rounds}")
+                logger.info(f"    Step-0 from: condition {c.step0_from}")
 
-            final_images = run_tts_loop(c, samples, source_images, bench_dir, logger)
-            tts_images[c.id] = final_images
+                # Get step-0 images to seed the TTS loop
+                source_images = step0_cache.get(c.step0_from, {})
+                if not source_images:
+                    logger.error(f"    No step-0 images from condition {c.step0_from}!")
+                    continue
+
+                final_images = run_tts_loop(c, samples, source_images, bench_dir, logger)
+                tts_images[c.id] = final_images
 
         if args.generate_only:
             total_imgs = sum(len(step0_cache.get(c.id, {})) for c in run_conds if c.id in step0_cache)
