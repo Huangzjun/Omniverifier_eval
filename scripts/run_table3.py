@@ -466,6 +466,14 @@ def parse_args():
              "For TTS conditions (7-10), evaluates cached final images if available, "
              "otherwise falls back to step-0 images from the source condition."
     )
+    parser.add_argument(
+        "--shard_id", type=int, default=0,
+        help="Shard index for multi-GPU parallelism (0-based). Use with --num_shards."
+    )
+    parser.add_argument(
+        "--num_shards", type=int, default=1,
+        help="Total number of shards (GPUs). Each shard processes samples[shard_id::num_shards]."
+    )
     return parser.parse_args()
 
 
@@ -491,12 +499,16 @@ def main():
     else:
         benchmarks = [args.benchmark]
 
+    is_sharded = args.num_shards > 1
+
     logger.info("=" * 80)
     logger.info("  REPRODUCING TABLE 3: OmniVerifier-TTS")
     logger.info("=" * 80)
     logger.info(f"  Conditions:  {[c.id for c in run_conds]}")
     logger.info(f"  Benchmarks:  {benchmarks}")
     logger.info(f"  TTS rounds:  {args.tts_rounds}")
+    if is_sharded:
+        logger.info(f"  Shard:       {args.shard_id} / {args.num_shards}")
     logger.info(f"  Output:      {output_dir}")
     logger.info("")
 
@@ -513,10 +525,18 @@ def main():
 
         dataset = build_dataset(benchmark, **data_cfg)
         dataset.load()
-        samples = list(dataset)
+        all_samples = list(dataset)
         if args.num_samples > 0:
-            samples = samples[: args.num_samples]
-        logger.info(f"  Loaded {len(samples)} samples")
+            all_samples = all_samples[: args.num_samples]
+
+        if is_sharded:
+            samples = all_samples[args.shard_id :: args.num_shards]
+            logger.info(
+                f"  Loaded {len(all_samples)} samples, shard {args.shard_id} handles {len(samples)}"
+            )
+        else:
+            samples = all_samples
+            logger.info(f"  Loaded {len(samples)} samples")
 
         bench_dir = ensure_dir(output_dir / benchmark)
 
