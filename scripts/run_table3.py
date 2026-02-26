@@ -523,9 +523,8 @@ def main():
             if c.verifier is None:
                 needed_step0.add(c.id)
 
-        for c in run_conds:
-            if c.id not in needed_step0:
-                continue
+        for cid in sorted(needed_step0):
+            c = CONDITIONS_BY_ID[cid]
             logger.info(f"\n  Condition {c.id}: {c.name}")
             images = run_step0_generation(c, samples, bench_dir, logger, batch_size=args.batch_size, num_workers=args.num_workers)
             step0_cache[c.id] = images
