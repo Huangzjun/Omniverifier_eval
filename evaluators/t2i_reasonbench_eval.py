@@ -84,18 +84,6 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
-def _parse_scores(raw_scores: list) -> list[float]:
-    """Convert raw score values to floats, clamped to {0, 0.5, 1}."""
-    parsed = []
-    for s in raw_scores:
-        try:
-            v = float(s)
-        except (ValueError, TypeError):
-            v = 0.0
-        v = max(0.0, min(1.0, v))
-        parsed.append(v)
-    return parsed
-
 
 class T2IReasonBenchEvaluator(BaseEvaluator):
     """Evaluator aligned with the official T2I-ReasonBench protocol.
@@ -201,11 +189,10 @@ class T2IReasonBenchEvaluator(BaseEvaluator):
         config: dict,
     ) -> tuple[float, float]:
         """Idiom Interpretation / Textual Image Design: reason + quality."""
-        reason_qs = eval_questions.get(config["reason_key"], "")
-        quality_qs = eval_questions.get(config["quality_key"], "")
-
-        reason_scores = self._score_qa_group(image, description, reason_qs)
-        quality_scores = self._score_qa_group(image, description, quality_qs)
+        reason_scores = self._score_qa_group(image, description,
+                                             eval_questions[config["reason_key"]])
+        quality_scores = self._score_qa_group(image, description,
+                                              eval_questions[config["quality_key"]])
 
         accuracy = _avg(reason_scores)
         quality = _avg(quality_scores)
@@ -219,13 +206,12 @@ class T2IReasonBenchEvaluator(BaseEvaluator):
         config: dict,
     ) -> tuple[float, float]:
         """Entity / Scientific: primary_reasoning + other_details + quality."""
-        primary_qs = eval_questions.get(config["reason_key"], "")
-        detail_qs = eval_questions.get(config["detail_key"], "")
-        quality_qs = eval_questions.get(config["quality_key"], "")
-
-        primary_scores = self._score_qa_group(image, description, primary_qs)
-        detail_scores = self._score_qa_group(image, description, detail_qs)
-        quality_scores = self._score_qa_group(image, description, quality_qs)
+        primary_scores = self._score_qa_group(image, description,
+                                              eval_questions[config["reason_key"]])
+        detail_scores = self._score_qa_group(image, description,
+                                             eval_questions[config["detail_key"]])
+        quality_scores = self._score_qa_group(image, description,
+                                              eval_questions[config["quality_key"]])
 
         w1 = config.get("reason_weight", 0.7)
         w2 = config.get("detail_weight", 0.3)
@@ -256,14 +242,10 @@ class T2IReasonBenchEvaluator(BaseEvaluator):
     ) -> list[float]:
         """Score a group of question-criterion pairs in a multi-turn session.
 
-        Builds a 3-message conversation:
-          User:      [image] "Describe this image."
-          Assistant:  <description>
-          User:      "Based on the image ... score 0/0.5/1 ..." + QA pairs
+        Matches the official T2I-ReasonBench protocol: extract JSON and
+        directly access the 'score' key. Raises on parse failure so the
+        caller (evaluate_images) can skip and log the sample.
         """
-        if not qa_pairs:
-            return [0.0]
-
         score_prompt = _SCORE_PROMPT_TEMPLATE.format(qa_pairs=qa_pairs)
 
         messages = [
@@ -288,16 +270,8 @@ class T2IReasonBenchEvaluator(BaseEvaluator):
 
         response = self._generate(messages)
         json_data = _extract_json(response)
-
-        if json_data and "score" in json_data:
-            return _parse_scores(json_data["score"])
-
-        # Fallback: try to extract numbers directly
-        numbers = re.findall(r"(\d+(?:\.\d+)?)", response)
-        if numbers:
-            return _parse_scores([float(n) for n in numbers])
-
-        return [0.0]
+        scores = json_data["score"]
+        return [float(s) for s in scores]
 
     def _generate(self, messages: list[dict]) -> str:
         """Run inference on the Qwen2.5-VL model."""

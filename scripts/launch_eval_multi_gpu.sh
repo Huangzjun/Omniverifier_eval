@@ -102,6 +102,7 @@ else
     echo "Merging sharded evaluation results..."
     python scripts/run_table3.py \
         --conditions $CONDITIONS_ARGS \
+        --benchmark t2i_reasonbench \
         --merge_eval \
         --merge_num_shards $NUM_SHARDS \
         2>&1 | tee "${LOG_DIR}/merge.log"

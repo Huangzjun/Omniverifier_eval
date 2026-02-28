@@ -363,6 +363,7 @@ def evaluate_images(
                 "score": result.score,
                 "dimension": getattr(sample, "dimension", ""),
                 "category": getattr(sample, "dimension", ""),
+                "details": result.details,
             })
         except Exception as e:
             logger.error(f"  [{cond.name}] Eval failed for {sample.id}: {e}")
