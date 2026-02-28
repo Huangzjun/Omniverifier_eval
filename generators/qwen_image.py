@@ -151,45 +151,73 @@ class QwenImageGenerator(BaseGenerator):
 class OpenAIImageGenerator(BaseGenerator):
     """GPT-Image-1 generation via OpenAI API (alternative backend)."""
 
-    def __init__(self, api_key: str | None = None, model: str = "gpt-image-1"):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "gpt-image-1",
+        max_retries: int = 5,
+        retry_delay: float = 3.0,
+        timeout: float = 120.0,
+    ):
         super().__init__(name="gpt_image")
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.model = model
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.timeout = timeout
+
+    def _get_client(self):
+        from openai import OpenAI
+        return OpenAI(api_key=self.api_key, timeout=self.timeout)
 
     def generate(self, prompt: str, **kwargs) -> GenerationResult:
-        from openai import OpenAI
+        client = self._get_client()
 
-        client = OpenAI(api_key=self.api_key)
-        response = client.images.generate(
-            model=self.model,
-            prompt=prompt,
-            n=1,
-            size="1024x1024",
-        )
-        image = self._extract_image(response.data[0])
-        return GenerationResult(image=image, prompt=prompt)
+        for attempt in range(self.max_retries):
+            try:
+                response = client.images.generate(
+                    model=self.model,
+                    prompt=prompt,
+                    n=1,
+                    size="1024x1024",
+                )
+                image = self._extract_image(response.data[0])
+                return GenerationResult(image=image, prompt=prompt)
+            except Exception as e:
+                print(f"[GPT-Image] Generate failed (attempt {attempt+1}/{self.max_retries}): {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
+
+        raise RuntimeError(f"Failed to generate image after {self.max_retries} attempts")
 
     def edit(self, image: Image.Image, original_prompt: str, edit_instruction: str, **kwargs) -> GenerationResult:
-        from openai import OpenAI
+        client = self._get_client()
 
-        client = OpenAI(api_key=self.api_key)
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        buffer.seek(0)
+        for attempt in range(self.max_retries):
+            try:
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                buffer.seek(0)
 
-        response = client.images.edit(
-            model=self.model,
-            image=buffer,
-            prompt=f"{original_prompt}. {edit_instruction}",
-            n=1,
-            size="1024x1024",
-        )
-        edited_image = self._extract_image(response.data[0])
-        return GenerationResult(
-            image=edited_image,
-            prompt=edit_instruction,
-            metadata={"edit_instruction": edit_instruction},
-        )
+                response = client.images.edit(
+                    model=self.model,
+                    image=buffer,
+                    prompt=f"{original_prompt}. {edit_instruction}",
+                    n=1,
+                    size="1024x1024",
+                )
+                edited_image = self._extract_image(response.data[0])
+                return GenerationResult(
+                    image=edited_image,
+                    prompt=edit_instruction,
+                    metadata={"edit_instruction": edit_instruction},
+                )
+            except Exception as e:
+                print(f"[GPT-Image] Edit failed (attempt {attempt+1}/{self.max_retries}): {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
+
+        raise RuntimeError(f"Failed to edit image after {self.max_retries} attempts")
 
     @staticmethod
     def _extract_image(data) -> Image.Image:

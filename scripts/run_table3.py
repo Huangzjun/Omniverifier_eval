@@ -245,17 +245,40 @@ def run_tts_loop(
     step0_images: dict[str, Image.Image],
     output_dir: Path,
     logger,
+    shard_id: int = 0,
+    num_shards: int = 1,
 ) -> dict[str, Image.Image]:
-    """Run sequential TTS verify→edit loop."""
+    """Run sequential TTS verify→edit loop.
+
+    When sharded, distributes only the MISSING samples evenly across shards
+    so all GPUs stay busy regardless of cache distribution.
+    """
     tts_dir = ensure_dir(output_dir / f"cond{cond.id}_{cond.name.replace(' ', '_').replace('(', '').replace(')', '')}")
 
-    # Check for cached final images
     final_dir = tts_dir / "final"
-    if final_dir.exists():
-        cached = load_step0_images(final_dir)
-        if len(cached) >= len(samples):
-            logger.info(f"  [{cond.name}] Found {len(cached)} cached TTS results, skipping")
-            return cached
+    final_dir.mkdir(parents=True, exist_ok=True)
+    cached_finals = load_step0_images(final_dir) if final_dir.exists() else {}
+
+    # Find missing samples across ALL data (before sharding)
+    missing_samples = [s for s in samples if s.id not in cached_finals]
+
+    if not missing_samples:
+        logger.info(f"  [{cond.name}] All {len(samples)} samples cached in final/, skipping")
+        return cached_finals
+
+    # Shard only the missing samples so work is evenly distributed
+    is_sharded = num_shards > 1
+    if is_sharded:
+        my_missing = missing_samples[shard_id::num_shards]
+        logger.info(f"  [{cond.name}] {len(cached_finals)} cached, {len(missing_samples)} missing total → "
+                     f"shard {shard_id} handles {len(my_missing)}")
+    else:
+        my_missing = missing_samples
+        logger.info(f"  [{cond.name}] {len(cached_finals)} cached, {len(my_missing)} missing → generating remaining")
+
+    if not my_missing:
+        logger.info(f"  [{cond.name}] Shard {shard_id} has no missing samples, skipping")
+        return cached_finals
 
     # Build verifier
     logger.info(f"  [{cond.name}] Building verifier: {cond.verifier}")
@@ -276,19 +299,10 @@ def run_tts_loop(
         output_dir=str(tts_dir),
     )
 
-    # Load any already-completed final images for per-sample resumption
-    final_dir = tts_dir / "final"
-    final_dir.mkdir(parents=True, exist_ok=True)
-    cached_finals = load_step0_images(final_dir) if final_dir.exists() else {}
-
-    # Run TTS on each sample (skip already finished ones)
+    # Run TTS on missing samples only
     final_images = dict(cached_finals)
-    skipped = 0
-    for sample in tqdm(samples, desc=f"TTS {cond.name}"):
-        if sample.id in cached_finals:
-            skipped += 1
-            continue
-
+    desc = f"TTS {cond.name}" + (f" (shard {shard_id})" if is_sharded else "")
+    for sample in tqdm(my_missing, desc=desc):
         initial_image = step0_images.get(sample.id)
         if initial_image is None:
             logger.warning(f"  [{cond.name}] No step-0 image for {sample.id}, skipping")
@@ -302,11 +316,7 @@ def run_tts_loop(
             )
             final_images[sample.id] = result.final_image
         except Exception as e:
-            logger.error(f"  [{cond.name}] TTS failed for {sample.id}: {e}")
-            final_images[sample.id] = initial_image
-
-    if skipped:
-        logger.info(f"  [{cond.name}] Skipped {skipped} cached samples")
+            logger.error(f"  [{cond.name}] TTS failed for {sample.id}: {e}, skipping")
 
     logger.info(
         f"  [{cond.name}] TTS completed: {len(final_images)} / {len(samples)} samples"
@@ -322,18 +332,24 @@ def evaluate_images(
     output_dir: Path,
     evaluator,
     logger,
+    shard_id: int = 0,
+    num_shards: int = 1,
 ) -> dict[str, Any]:
     """Evaluate generated images on a benchmark."""
-    results_path = output_dir / f"cond{cond.id}_eval_{benchmark}.json"
+    is_sharded = num_shards > 1
+    if is_sharded:
+        results_path = output_dir / f"cond{cond.id}_eval_{benchmark}_shard{shard_id}.json"
+    else:
+        results_path = output_dir / f"cond{cond.id}_eval_{benchmark}.json"
 
     # Check cache
     if results_path.exists():
-        logger.info(f"  [{cond.name}] Found cached eval results")
+        logger.info(f"  [{cond.name}] Found cached eval results: {results_path.name}")
         with open(results_path) as f:
             return json.load(f)
 
     eval_results = []
-    for sample in tqdm(samples, desc=f"Eval {cond.name}"):
+    for sample in tqdm(samples, desc=f"Eval {cond.name}" + (f" (shard {shard_id})" if is_sharded else "")):
         if sample.id not in images:
             continue
         try:
@@ -362,6 +378,38 @@ def evaluate_images(
     output = {"condition": cond.name, "scores": scores, "per_sample": eval_results}
     save_json(output, results_path)
     return output
+
+
+def merge_sharded_eval_results(
+    cond: Condition,
+    benchmark: str,
+    output_dir: Path,
+    num_shards: int,
+    logger,
+) -> dict[str, Any] | None:
+    """Merge per-shard evaluation results into a single combined result."""
+    all_per_sample = []
+    for sid in range(num_shards):
+        shard_path = output_dir / f"cond{cond.id}_eval_{benchmark}_shard{sid}.json"
+        if not shard_path.exists():
+            logger.warning(f"  [{cond.name}] Missing shard {sid}: {shard_path}")
+            return None
+        with open(shard_path) as f:
+            shard_data = json.load(f)
+        all_per_sample.extend(shard_data.get("per_sample", []))
+
+    if benchmark == "t2i_reasonbench":
+        dimensions = ["idiom_interpretation", "textual_image_design",
+                       "entity_reasoning", "scientific_reasoning"]
+        scores = compute_dimension_scores(all_per_sample, dimensions)
+    else:
+        scores = aggregate_scores(all_per_sample)
+
+    merged = {"condition": cond.name, "scores": scores, "per_sample": all_per_sample}
+    merged_path = output_dir / f"cond{cond.id}_eval_{benchmark}.json"
+    save_json(merged, merged_path)
+    logger.info(f"  [{cond.name}] Merged {num_shards} shards → {merged_path.name} ({len(all_per_sample)} samples)")
+    return merged
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -474,6 +522,20 @@ def parse_args():
         "--num_shards", type=int, default=1,
         help="Total number of shards (GPUs). Each shard processes samples[shard_id::num_shards]."
     )
+    parser.add_argument(
+        "--merge_eval", action="store_true",
+        help="Merge per-shard evaluation results and print final Table 3. "
+             "Run this (without --shard_id/--num_shards) after all shards finish."
+    )
+    parser.add_argument(
+        "--merge_num_shards", type=int, default=8,
+        help="Number of shards to merge (used with --merge_eval)."
+    )
+    parser.add_argument(
+        "--no_quant", action="store_true",
+        help="Disable quantization for the judge model (use full BF16 precision). "
+             "Requires more VRAM (~144GB for 72B). Use with multi-GPU device_map=auto."
+    )
     return parser.parse_args()
 
 
@@ -500,6 +562,36 @@ def main():
         benchmarks = [args.benchmark]
 
     is_sharded = args.num_shards > 1
+
+    # ── Merge mode: combine per-shard eval results and print table ──
+    if args.merge_eval:
+        logger.info("=" * 80)
+        logger.info("  MERGING SHARDED EVALUATION RESULTS")
+        logger.info("=" * 80)
+        logger.info(f"  Conditions:  {[c.id for c in run_conds]}")
+        logger.info(f"  Benchmarks:  {benchmarks}")
+        logger.info(f"  Num shards:  {args.merge_num_shards}")
+        logger.info("")
+
+        for benchmark in benchmarks:
+            bench_dir = ensure_dir(output_dir / benchmark)
+            all_results: dict[int, dict] = {}
+
+            for c in run_conds:
+                result = merge_sharded_eval_results(
+                    c, benchmark, bench_dir, args.merge_num_shards, logger,
+                )
+                if result is not None:
+                    all_results[c.id] = result
+
+            print_table3(all_results, benchmark, logger)
+            save_json(
+                {str(k): v for k, v in all_results.items()},
+                bench_dir / "table3_results.json",
+            )
+
+        logger.info(f"\n✅ Merge complete. Results saved to {output_dir}")
+        return
 
     logger.info("=" * 80)
     logger.info("  REPRODUCING TABLE 3: OmniVerifier-TTS")
@@ -543,7 +635,11 @@ def main():
         # Load evaluator (skip if generate_only)
         evaluator = None
         if not args.generate_only:
-            evaluator = build_evaluator(benchmark)
+            eval_kwargs = {}
+            if args.no_quant:
+                eval_kwargs["quantization"] = None
+                eval_kwargs["torch_dtype"] = "bfloat16"
+            evaluator = build_evaluator(benchmark, **eval_kwargs)
             evaluator.load()
 
         # Storage for step-0 images (shared between conditions)
@@ -612,7 +708,10 @@ def main():
                     logger.error(f"    No step-0 images from condition {c.step0_from}!")
                     continue
 
-                final_images = run_tts_loop(c, samples, source_images, bench_dir, logger)
+                final_images = run_tts_loop(
+                    c, all_samples, source_images, bench_dir, logger,
+                    shard_id=args.shard_id, num_shards=args.num_shards,
+                )
                 tts_images[c.id] = final_images
 
         if args.generate_only:
@@ -637,20 +736,25 @@ def main():
 
                 result = evaluate_images(
                     c, benchmark, samples, images, bench_dir, evaluator, logger,
+                    shard_id=args.shard_id, num_shards=args.num_shards,
                 )
                 all_results[c.id] = result
 
                 overall = result.get("scores", {}).get("overall", 0)
                 logger.info(f"    → Overall: {overall:.1f}%")
 
-            # ── Print Table 3 ────────────────────────────────────────
-            print_table3(all_results, benchmark, logger)
+            if is_sharded:
+                logger.info(f"\n── Shard {args.shard_id}/{args.num_shards} evaluation done. "
+                            f"Run merge after all shards complete. ──")
+            else:
+                # ── Print Table 3 ────────────────────────────────────────
+                print_table3(all_results, benchmark, logger)
 
-            # Save full results
-            save_json(
-                {str(k): v for k, v in all_results.items()},
-                bench_dir / "table3_results.json",
-            )
+                # Save full results
+                save_json(
+                    {str(k): v for k, v in all_results.items()},
+                    bench_dir / "table3_results.json",
+                )
 
     logger.info(f"\n✅ All done. Results saved to {output_dir}")
 

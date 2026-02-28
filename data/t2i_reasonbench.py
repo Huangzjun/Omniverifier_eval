@@ -41,7 +41,7 @@ class T2IReasonBenchDataset(BaseDataset):
     def __init__(
         self,
         prompts_dir: str = "data/t2i_reasonbench_raw/prompts",
-        eval_questions_dir: str = "data/t2i_reasonbench_raw/deepseek_evaluatioin_qs",
+        eval_questions_dir: str = "data/t2i_reasonbench_raw/deepseek_evaluation_qs",
         dimensions: list[str] | None = None,
     ):
         super().__init__(name="t2i_reasonbench")

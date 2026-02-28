@@ -4,7 +4,7 @@ benchmark: "t2i_reasonbench"
 
 data:
   prompts_dir: "data/t2i_reasonbench_raw/prompts"
-  eval_questions_dir: "data/t2i_reasonbench_raw/deepseek_evaluatioin_qs"
+  eval_questions_dir: "data/t2i_reasonbench_raw/deepseek_evaluation_qs"
   dimensions:
     - "idiom_interpretation"
     - "textual_image_design"

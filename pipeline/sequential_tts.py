@@ -129,7 +129,14 @@ class SequentialTTS:
 
         # Early stop if already aligned
         if self.early_stop and verification.is_aligned:
+            final_dir = self.output_dir / "final"
+            final_dir.mkdir(parents=True, exist_ok=True)
+            save_image(current_image, final_dir / f"{sample_id}.png")
+
             total_time = time.time() - start_time
+            self.logger.info(
+                f"[{sample_id}] Early stop at step 0 (already aligned), time={total_time:.1f}s"
+            )
             return TTSResult(
                 sample_id=sample_id,
                 prompt=prompt,
