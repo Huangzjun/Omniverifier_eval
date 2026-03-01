@@ -303,6 +303,10 @@ class T2IReasonBenchEvaluator(BaseEvaluator):
         decoded = self._processor.batch_decode(
             trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
         )
+
+        del inputs, output_ids, trimmed, image_inputs, video_inputs
+        torch.cuda.empty_cache()
+
         return decoded[0].strip()
 
     # ─── Fallback & helpers ────────────────────────────────────────

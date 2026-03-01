@@ -413,6 +413,27 @@ def merge_sharded_eval_results(
     return merged
 
 
+def _try_auto_merge(
+    cond: Condition,
+    benchmark: str,
+    output_dir: Path,
+    num_shards: int,
+    logger,
+) -> None:
+    """Auto-merge when all shard files for a condition are present."""
+    merged_path = output_dir / f"cond{cond.id}_eval_{benchmark}.json"
+    if merged_path.exists():
+        return
+
+    for sid in range(num_shards):
+        shard_path = output_dir / f"cond{cond.id}_eval_{benchmark}_shard{sid}.json"
+        if not shard_path.exists():
+            return
+
+    logger.info(f"\n  [Auto-merge] All {num_shards} shards ready for condition {cond.id} ({cond.name})")
+    merge_sharded_eval_results(cond, benchmark, output_dir, num_shards, logger)
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Table formatting
 # ═══════════════════════════════════════════════════════════════════
@@ -744,9 +765,11 @@ def main():
                 overall = result.get("scores", {}).get("overall", 0)
                 logger.info(f"    → Overall: {overall:.1f}%")
 
+                if is_sharded:
+                    _try_auto_merge(c, benchmark, bench_dir, args.num_shards, logger)
+
             if is_sharded:
-                logger.info(f"\n── Shard {args.shard_id}/{args.num_shards} evaluation done. "
-                            f"Run merge after all shards complete. ──")
+                logger.info(f"\n── Shard {args.shard_id}/{args.num_shards} evaluation done. ──")
             else:
                 # ── Print Table 3 ────────────────────────────────────────
                 print_table3(all_results, benchmark, logger)
