@@ -184,7 +184,7 @@ class OpenAIImageGenerator(BaseGenerator):
                 image = self._extract_image(response.data[0])
                 return GenerationResult(image=image, prompt=prompt)
             except Exception as e:
-                print(f"[GPT-Image] Generate failed (attempt {attempt+1}/{self.max_retries}): {e}")
+                self._log_openai_error("Generate", attempt, prompt, e)
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (attempt + 1))
 
@@ -192,17 +192,31 @@ class OpenAIImageGenerator(BaseGenerator):
 
     def edit(self, image: Image.Image, original_prompt: str, edit_instruction: str, **kwargs) -> GenerationResult:
         client = self._get_client()
+        combined_prompt = f"{original_prompt}. {edit_instruction}"
+        if len(combined_prompt) > 1000:
+            combined_prompt = combined_prompt[:997] + "..."
+
+        rgba_image = image.convert("RGBA").resize((1024, 1024), Image.LANCZOS)
+
+        mask = Image.new("RGBA", (1024, 1024), (0, 0, 0, 0))
 
         for attempt in range(self.max_retries):
             try:
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-                buffer.seek(0)
+                img_buf = io.BytesIO()
+                rgba_image.save(img_buf, format="PNG")
+                img_buf.seek(0)
+                img_buf.name = "image.png"
+
+                mask_buf = io.BytesIO()
+                mask.save(mask_buf, format="PNG")
+                mask_buf.seek(0)
+                mask_buf.name = "mask.png"
 
                 response = client.images.edit(
-                    model=self.model,
-                    image=buffer,
-                    prompt=f"{original_prompt}. {edit_instruction}",
+                    model="dall-e-2",
+                    image=img_buf,
+                    mask=mask_buf,
+                    prompt=combined_prompt,
                     n=1,
                     size="1024x1024",
                 )
@@ -213,11 +227,47 @@ class OpenAIImageGenerator(BaseGenerator):
                     metadata={"edit_instruction": edit_instruction},
                 )
             except Exception as e:
-                print(f"[GPT-Image] Edit failed (attempt {attempt+1}/{self.max_retries}): {e}")
+                self._log_openai_error("Edit", attempt, combined_prompt, e)
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (attempt + 1))
 
         raise RuntimeError(f"Failed to edit image after {self.max_retries} attempts")
+
+    def _log_openai_error(self, action: str, attempt: int, prompt: str, exc: Exception) -> None:
+        """Print structured OpenAI API error details to stderr."""
+        import sys
+        prompt_preview = prompt[:200] + ("..." if len(prompt) > 200 else "")
+
+        try:
+            from openai import APIStatusError
+            if isinstance(exc, APIStatusError):
+                body = getattr(exc, "body", None) or {}
+                err = body.get("error", {}) if isinstance(body, dict) else {}
+                req_id = "N/A"
+                if exc.response is not None:
+                    req_id = exc.response.headers.get("x-request-id", "N/A")
+                print(
+                    f"[GPT-Image] {action} failed (attempt {attempt+1}/{self.max_retries})\n"
+                    f"  status_code  : {exc.status_code}\n"
+                    f"  error.type   : {err.get('type', 'N/A')}\n"
+                    f"  error.code   : {err.get('code', 'N/A')}\n"
+                    f"  error.param  : {err.get('param', 'N/A')}\n"
+                    f"  error.message: {err.get('message', str(exc))}\n"
+                    f"  request_id   : {req_id}\n"
+                    f"  prompt_preview: {prompt_preview}",
+                    file=sys.stderr, flush=True,
+                )
+                return
+        except ImportError:
+            pass
+
+        print(
+            f"[GPT-Image] {action} failed (attempt {attempt+1}/{self.max_retries})\n"
+            f"  exception_type: {type(exc).__name__}\n"
+            f"  message       : {exc}\n"
+            f"  prompt_preview: {prompt_preview}",
+            file=sys.stderr, flush=True,
+        )
 
     @staticmethod
     def _extract_image(data) -> Image.Image:
