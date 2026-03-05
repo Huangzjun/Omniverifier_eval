@@ -69,38 +69,63 @@ def _build_verification_question(prompt: str) -> str:
     )
 
 
+def _try_extract_json(text: str) -> dict | None:
+    """Try multiple strategies to extract a JSON object from *text*."""
+    # 1. Direct JSON parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # 2. Strip markdown code-block markers (```json ... ``` or ``` ... ```)
+    stripped = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
+    try:
+        return json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # 3. Regex: first { ... } block
+    match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return None
+
+
 def _parse_verification_output(raw_output: str) -> tuple[bool, str, str]:
     """Parse the verification output (with <think> tags and JSON).
 
     Handles multiple output formats:
     1. <think>...</think> { JSON }          (OmniVerifier-7B style)
-    2. ```json\n{ JSON }\n```              (markdown code block)
-    3. Raw JSON string                      (plain JSON)
-    4. JSON embedded in natural language     (regex extraction)
+    2. { JSON } <think>...</think>          (vanilla Qwen-VL may put JSON first)
+    3. ```json\n{ JSON }\n```              (markdown code block)
+    4. Raw JSON string                      (plain JSON)
+    5. JSON embedded in natural language     (regex extraction)
 
     Returns (is_aligned, explanation, edit_prompt).
     """
     try:
-        # Strip <think> block if present
-        text = raw_output
-        if "</think>" in text:
-            text = text.split("</think>")[1].strip()
+        # Build candidate texts in priority order:
+        #   1) after </think>  (normal OmniVerifier-7B output)
+        #   2) before <think>  (vanilla Qwen-VL sometimes puts JSON first)
+        #   3) full raw_output (fallback)
+        candidates = []
+        if "</think>" in raw_output:
+            candidates.append(raw_output.split("</think>", 1)[1].strip())
+        if "<think>" in raw_output:
+            candidates.append(raw_output.split("<think>", 1)[0].strip())
+        candidates.append(raw_output)
 
-        # Try direct JSON parse first
-        try:
-            output_json = json.loads(text)
-        except json.JSONDecodeError:
-            # Strip markdown code block markers: ```json ... ``` or ``` ... ```
-            stripped = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`")
-            try:
-                output_json = json.loads(stripped)
-            except json.JSONDecodeError:
-                # Last resort: find first { ... } block via regex
-                match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-                if match:
-                    output_json = json.loads(match.group())
-                else:
-                    return False, "", "remain unchanged"
+        output_json = None
+        for text in candidates:
+            if not text:
+                continue
+            output_json = _try_extract_json(text)
+            if output_json is not None:
+                break
+
+        if output_json is None:
+            return False, "", "remain unchanged"
 
         answer = output_json.get("answer", False)
         if isinstance(answer, str):

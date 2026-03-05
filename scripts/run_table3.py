@@ -389,6 +389,16 @@ def merge_sharded_eval_results(
     logger,
 ) -> dict[str, Any] | None:
     """Merge per-shard evaluation results into a single combined result."""
+    merged_path = output_dir / f"cond{cond.id}_eval_{benchmark}.json"
+
+    if num_shards <= 1:
+        if merged_path.exists():
+            logger.info(f"  [{cond.name}] Single-shard run, loading {merged_path.name} directly")
+            with open(merged_path) as f:
+                return json.load(f)
+        logger.warning(f"  [{cond.name}] Single-shard result not found: {merged_path}")
+        return None
+
     all_per_sample = []
     for sid in range(num_shards):
         shard_path = output_dir / f"cond{cond.id}_eval_{benchmark}_shard{sid}.json"

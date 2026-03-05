@@ -22,9 +22,9 @@ pipeline:
 
 generation:
   backend: "qwen_image"  # "qwen_image" or "gpt_image"
-  dashscope_model: "wanx-v1"
+  dashscope_model: "qwen-image"
   openai_model: "gpt-image-1"
-  image_size: 1024
+  image_size: 1328
   num_images: 1
 
 evaluation:

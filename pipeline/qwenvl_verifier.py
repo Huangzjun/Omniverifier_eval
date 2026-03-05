@@ -16,10 +16,13 @@ from PIL import Image
 
 from pipeline.omniverifier import (
     VerificationResult,
-    SYS_PROMPT,
     _build_verification_question,
     _parse_verification_output,
 )
+
+# Vanilla Qwen2.5-VL does not support <think> tags (that's an OmniVerifier-7B
+# RL training artefact), so we omit the think instruction to avoid garbled output.
+_QWENVL_SYS_PROMPT = ""
 
 
 class QwenVLVerifier:
@@ -81,7 +84,7 @@ class QwenVLVerifier:
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": question + SYS_PROMPT},
+                    {"type": "text", "text": question + _QWENVL_SYS_PROMPT},
                 ],
             },
         ]
