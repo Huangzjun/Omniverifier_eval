@@ -8,13 +8,21 @@ CONDITION=${2:-8}
 shift 2 2>/dev/null
 EXTRA_ARGS="$@"
 
-LOG_DIR="results/table3/logs/cond${CONDITION}"
+# Scored mode → separate directory
+if echo "$EXTRA_ARGS" | grep -q -- "--use_scored"; then
+    BASE_DIR="results/table3_scored"
+else
+    BASE_DIR="results/table3"
+fi
+
+LOG_DIR="${BASE_DIR}/logs/cond${CONDITION}"
 mkdir -p "$LOG_DIR"
 
 echo "============================================="
 echo " Multi-GPU TTS Generation"
 echo " GPUs: $NUM_GPUS"
 echo " Condition: $CONDITION"
+echo " Output dir: $BASE_DIR"
 echo " Extra args: $EXTRA_ARGS"
 echo "============================================="
 
@@ -27,6 +35,7 @@ for SHARD_ID in $(seq 0 $((NUM_GPUS - 1))); do
     CUDA_VISIBLE_DEVICES=$SHARD_ID python scripts/run_table3.py \
         --conditions $CONDITION \
         --benchmark t2i_reasonbench \
+        --output_dir "$BASE_DIR" \
         --shard_id $SHARD_ID \
         --num_shards $NUM_GPUS \
         $EXTRA_ARGS \
