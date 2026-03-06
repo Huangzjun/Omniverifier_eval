@@ -3,8 +3,10 @@
 This module wraps the OmniVerifier-7B model (Qwen2.5-VL-7B fine-tuned via RL)
 for image-prompt alignment verification.
 
-The verification output is a JSON object:
-  {"answer": true/false, "explanation": "...", "edit_prompt": "..."}
+Supports two verification modes:
+  1. Legacy mode: simple true/false with explanation and edit_prompt
+  2. Scored mode: four-dimensional scoring (object, count, attribute, spatial_action)
+     with semi-discrete scores {0.0, 0.25, 0.5, 0.75, 1.0}
 
 The model uses <think>...</think> tags for chain-of-thought reasoning,
 and the JSON answer follows after the closing </think> tag.
@@ -16,11 +18,18 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 from PIL import Image
+
+from pipeline.verification_schema import (
+    DimensionScores,
+    ScoredVerificationResult,
+    build_scored_verification_question,
+    parse_scored_output,
+)
 
 
 @dataclass
@@ -31,6 +40,8 @@ class VerificationResult:
     edit_instruction: str
     raw_output: str
     confidence: float = 0.0
+    scores: DimensionScores | None = None
+    primary_issue: str = ""
 
 
 SYS_PROMPT = (
@@ -143,6 +154,10 @@ class OmniVerifier:
     Supports two inference backends:
     1. Transformers (default): Direct HuggingFace inference
     2. vLLM: Faster inference with vLLM serving
+
+    And two verification modes:
+    1. Legacy (use_scored=False): simple true/false
+    2. Scored (use_scored=True): four-dimensional scoring
     """
 
     def __init__(
@@ -152,12 +167,14 @@ class OmniVerifier:
         torch_dtype: str = "bfloat16",
         max_new_tokens: int = 2048,
         use_vllm: bool = False,
+        use_scored: bool = False,
     ):
         self.model_path = model_path
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.max_new_tokens = max_new_tokens
         self.use_vllm = use_vllm
+        self.use_scored = use_scored
 
         self._model = None
         self._processor = None
@@ -202,10 +219,16 @@ class OmniVerifier:
 
     def verify(self, image: Image.Image, prompt: str) -> VerificationResult:
         """Verify whether an image is aligned with a text prompt."""
+        if self.use_scored:
+            return self._verify_scored(image, prompt)
+        return self._verify_legacy(image, prompt)
+
+    def _verify_legacy(self, image: Image.Image, prompt: str) -> VerificationResult:
+        """Legacy verification: simple true/false."""
         if self.use_vllm:
-            raw_output = self._infer_vllm(image, prompt)
+            raw_output = self._infer_vllm(image, prompt, scored=False)
         else:
-            raw_output = self._infer_transformers(image, prompt)
+            raw_output = self._infer_transformers(image, prompt, scored=False)
 
         is_aligned, explanation, edit_prompt = _parse_verification_output(raw_output)
 
@@ -216,13 +239,34 @@ class OmniVerifier:
             raw_output=raw_output,
         )
 
-    def _infer_transformers(self, image: Image.Image, prompt: str) -> str:
+    def _verify_scored(self, image: Image.Image, prompt: str) -> VerificationResult:
+        """Scored verification: four-dimensional scoring."""
+        if self.use_vllm:
+            raw_output = self._infer_vllm(image, prompt, scored=True)
+        else:
+            raw_output = self._infer_transformers(image, prompt, scored=True)
+
+        result = parse_scored_output(raw_output)
+
+        return VerificationResult(
+            is_aligned=result.answer,
+            explanation=result.explanation,
+            edit_instruction=result.edit_prompt,
+            raw_output=raw_output,
+            scores=result.scores,
+            primary_issue=result.primary_issue,
+        )
+
+    def _infer_transformers(self, image: Image.Image, prompt: str, scored: bool = False) -> str:
         """Run inference using transformers.
 
         Matches the official repo: single user message with
         (question + SYS_PROMPT), no system role.
         """
-        question = _build_verification_question(prompt)
+        if scored:
+            question = build_scored_verification_question(prompt)
+        else:
+            question = _build_verification_question(prompt)
 
         messages = [
             {
@@ -264,9 +308,12 @@ class OmniVerifier:
         )
         return output_text[0]
 
-    def _infer_vllm(self, image: Image.Image, prompt: str) -> str:
+    def _infer_vllm(self, image: Image.Image, prompt: str, scored: bool = False) -> str:
         """Run inference using vLLM."""
-        question = _build_verification_question(prompt)
+        if scored:
+            question = build_scored_verification_question(prompt)
+        else:
+            question = _build_verification_question(prompt)
 
         messages = [
             {

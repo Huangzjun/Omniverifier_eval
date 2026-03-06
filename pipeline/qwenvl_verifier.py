@@ -19,9 +19,11 @@ from pipeline.omniverifier import (
     _build_verification_question,
     _parse_verification_output,
 )
+from pipeline.verification_schema import (
+    build_scored_verification_question,
+    parse_scored_output,
+)
 
-# Vanilla Qwen2.5-VL does not support <think> tags (that's an OmniVerifier-7B
-# RL training artefact), so we omit the think instruction to avoid garbled output.
 _QWENVL_SYS_PROMPT = ""
 
 
@@ -38,11 +40,13 @@ class QwenVLVerifier:
         device: str = "cuda",
         torch_dtype: str = "bfloat16",
         max_new_tokens: int = 2048,
+        use_scored: bool = False,
     ):
         self.model_path = model_path
         self.device = device
         self.torch_dtype = getattr(torch, torch_dtype)
         self.max_new_tokens = max_new_tokens
+        self.use_scored = use_scored
         self._model = None
         self._processor = None
 
@@ -61,7 +65,13 @@ class QwenVLVerifier:
 
     def verify(self, image: Image.Image, prompt: str) -> VerificationResult:
         """Verify image-prompt alignment using vanilla Qwen2.5-VL."""
-        raw_output = self._infer(image, prompt)
+        if self.use_scored:
+            return self._verify_scored(image, prompt)
+        return self._verify_legacy(image, prompt)
+
+    def _verify_legacy(self, image: Image.Image, prompt: str) -> VerificationResult:
+        """Legacy verification: simple true/false."""
+        raw_output = self._infer(image, prompt, scored=False)
         is_aligned, explanation, edit_prompt = _parse_verification_output(raw_output)
 
         return VerificationResult(
@@ -71,13 +81,30 @@ class QwenVLVerifier:
             raw_output=raw_output,
         )
 
-    def _infer(self, image: Image.Image, prompt: str) -> str:
+    def _verify_scored(self, image: Image.Image, prompt: str) -> VerificationResult:
+        """Scored verification: four-dimensional scoring."""
+        raw_output = self._infer(image, prompt, scored=True)
+        result = parse_scored_output(raw_output)
+
+        return VerificationResult(
+            is_aligned=result.answer,
+            explanation=result.explanation,
+            edit_instruction=result.edit_prompt,
+            raw_output=raw_output,
+            scores=result.scores,
+            primary_issue=result.primary_issue,
+        )
+
+    def _infer(self, image: Image.Image, prompt: str, scored: bool = False) -> str:
         """Run inference using transformers.
 
         Uses the same prompt format as OmniVerifier: single user
         message with (question + SYS_PROMPT), no system role.
         """
-        question = _build_verification_question(prompt)
+        if scored:
+            question = build_scored_verification_question(prompt)
+        else:
+            question = _build_verification_question(prompt)
 
         messages = [
             {

@@ -247,6 +247,7 @@ def run_tts_loop(
     logger,
     shard_id: int = 0,
     num_shards: int = 1,
+    use_scored: bool = False,
 ) -> dict[str, Image.Image]:
     """Run sequential TTS verify→edit loop.
 
@@ -282,7 +283,7 @@ def run_tts_loop(
 
     # Build verifier
     logger.info(f"  [{cond.name}] Building verifier: {cond.verifier}")
-    verifier = build_verifier(cond.verifier)
+    verifier = build_verifier(cond.verifier, use_scored=use_scored)
     verifier.load()
 
     # Build generator (for editing)
@@ -568,6 +569,11 @@ def parse_args():
         help="Disable quantization for the judge model (use full BF16 precision). "
              "Requires more VRAM (~144GB for 72B). Use with multi-GPU device_map=auto."
     )
+    parser.add_argument(
+        "--use_scored", action="store_true",
+        help="Enable four-dimensional scoring mode (object/count/attribute/spatial_action). "
+             "Scores are semi-discrete: {0.0, 0.25, 0.5, 0.75, 1.0}."
+    )
     return parser.parse_args()
 
 
@@ -631,6 +637,7 @@ def main():
     logger.info(f"  Conditions:  {[c.id for c in run_conds]}")
     logger.info(f"  Benchmarks:  {benchmarks}")
     logger.info(f"  TTS rounds:  {args.tts_rounds}")
+    logger.info(f"  Scored mode: {args.use_scored}")
     if is_sharded:
         logger.info(f"  Shard:       {args.shard_id} / {args.num_shards}")
     logger.info(f"  Output:      {output_dir}")
@@ -743,6 +750,7 @@ def main():
                 final_images = run_tts_loop(
                     c, all_samples, source_images, bench_dir, logger,
                     shard_id=args.shard_id, num_shards=args.num_shards,
+                    use_scored=args.use_scored,
                 )
                 tts_images[c.id] = final_images
 

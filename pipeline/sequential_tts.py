@@ -282,4 +282,7 @@ class SequentialTTS:
             "verification_time": step.verification_time,
             "raw_output": step.verification.raw_output,
         }
+        if step.verification.scores is not None:
+            meta["scores"] = step.verification.scores.to_dict()
+            meta["primary_issue"] = step.verification.primary_issue
         save_json(meta, step_dir / f"step_{step.step}_meta.json")
