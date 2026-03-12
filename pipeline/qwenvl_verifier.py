@@ -82,7 +82,7 @@ class QwenVLVerifier:
         )
 
     def _verify_scored(self, image: Image.Image, prompt: str) -> VerificationResult:
-        """Scored verification: four-dimensional scoring."""
+        """Scored verification: six-dimensional scoring."""
         raw_output = self._infer(image, prompt, scored=True)
         result = parse_scored_output(raw_output)
 
@@ -134,6 +134,8 @@ class QwenVLVerifier:
         generated_ids = self._model.generate(
             **inputs,
             max_new_tokens=self.max_new_tokens,
+            temperature=0.0,
+            do_sample=False,
         )
         generated_ids_trimmed = [
             out_ids[len(in_ids):]

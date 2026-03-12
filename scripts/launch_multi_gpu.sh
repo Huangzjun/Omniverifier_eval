@@ -8,21 +8,21 @@ CONDITION=${2:-8}
 shift 2 2>/dev/null
 EXTRA_ARGS="$@"
 
-# Scored mode → separate directory
-if echo "$EXTRA_ARGS" | grep -q -- "--use_scored"; then
-    BASE_DIR="results/table3_scored"
-else
-    BASE_DIR="results/table3"
-fi
+BASE_DIR="results/table3"
 
-LOG_DIR="${BASE_DIR}/logs/cond${CONDITION}"
+# Scored mode → logs go to the scored directory
+if echo "$EXTRA_ARGS" | grep -q -- "--use_scored"; then
+    LOG_DIR="results/table3_scored/logs/cond${CONDITION}"
+else
+    LOG_DIR="${BASE_DIR}/logs/cond${CONDITION}"
+fi
 mkdir -p "$LOG_DIR"
 
 echo "============================================="
 echo " Multi-GPU TTS Generation"
 echo " GPUs: $NUM_GPUS"
 echo " Condition: $CONDITION"
-echo " Output dir: $BASE_DIR"
+echo " Base dir:   $BASE_DIR"
 echo " Extra args: $EXTRA_ARGS"
 echo "============================================="
 

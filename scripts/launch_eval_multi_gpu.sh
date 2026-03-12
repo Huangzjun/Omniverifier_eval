@@ -28,7 +28,23 @@ CONDITIONS_LABEL="${CONDITIONS_CSV//,/_}"
 
 TOTAL_GPUS=$((NUM_SHARDS * GPUS_PER_SHARD))
 
-LOG_DIR="results/table3/logs/cond${CONDITIONS_LABEL}_eval"
+# Extract --output_dir from EXTRA_ARGS (default: results/table3)
+OUTPUT_DIR="results/table3"
+REMAINING_ARGS=""
+SKIP_NEXT=false
+for arg in $EXTRA_ARGS; do
+    if $SKIP_NEXT; then
+        OUTPUT_DIR="$arg"
+        SKIP_NEXT=false
+    elif [ "$arg" = "--output_dir" ]; then
+        SKIP_NEXT=true
+    else
+        REMAINING_ARGS="$REMAINING_ARGS $arg"
+    fi
+done
+EXTRA_ARGS="--output_dir $OUTPUT_DIR $REMAINING_ARGS"
+
+LOG_DIR="${OUTPUT_DIR}/logs/cond${CONDITIONS_LABEL}_eval"
 mkdir -p "$LOG_DIR"
 
 echo "============================================="
@@ -105,6 +121,7 @@ else
         --benchmark t2i_reasonbench \
         --merge_eval \
         --merge_num_shards $NUM_SHARDS \
+        $EXTRA_ARGS \
         2>&1 | tee "${LOG_DIR}/merge.log"
     echo ""
     echo "Done! Merged results saved. See ${LOG_DIR}/merge.log"

@@ -215,14 +215,16 @@ class SequentialTTS:
             total_time=total_time,
         )
 
-        # Save final image
+        # Save final image only if aligned
         final_dir = self.output_dir / "final"
         final_dir.mkdir(parents=True, exist_ok=True)
-        save_image(result.final_image, final_dir / f"{sample_id}.png")
+        if result.is_aligned:
+            save_image(result.final_image, final_dir / f"{sample_id}.png")
 
         self.logger.info(
             f"[{sample_id}] Completed: {len(steps)} steps, "
             f"aligned={result.is_aligned}, time={total_time:.1f}s"
+            + ("" if result.is_aligned else " (not saved to final/)")
         )
 
         return result

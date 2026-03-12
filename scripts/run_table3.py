@@ -147,32 +147,14 @@ def run_step0_generation(
     logger,
     batch_size: int = 4,
     num_workers: int = 1,
-    fallback_dir: Path | None = None,
 ) -> dict[str, Image.Image]:
     """Generate step-0 images for a condition.
 
     For diffusion models, generates in batches of `batch_size` for GPU parallelism.
     For API-based generators, uses `num_workers` threads for concurrent requests.
     Already-generated images are skipped automatically.
-
-    If fallback_dir is provided (e.g. the non-scored results/table3 directory),
-    existing step-0 images are reused from there via symlinks to avoid re-generation.
     """
     images_dir = ensure_dir(output_dir / f"cond{cond.id}_{cond.generator}" / "images")
-
-    # If a fallback directory has step-0 images, symlink them to avoid re-generation
-    if fallback_dir is not None:
-        fallback_images = fallback_dir / f"cond{cond.id}_{cond.generator}" / "images"
-        if fallback_images.exists() and fallback_images != images_dir:
-            import os
-            linked = 0
-            for src_png in fallback_images.glob("*.png"):
-                dst_png = images_dir / src_png.name
-                if not dst_png.exists():
-                    os.symlink(src_png.resolve(), dst_png)
-                    linked += 1
-            if linked:
-                logger.info(f"  [{cond.name}] Symlinked {linked} step-0 images from {fallback_images}")
 
     # Check for existing images (skip already generated)
     existing_ids = {p.stem for p in images_dir.glob("*.png")}
@@ -589,7 +571,7 @@ def parse_args():
     )
     parser.add_argument(
         "--use_scored", action="store_true",
-        help="Enable four-dimensional scoring mode (object/count/attribute/spatial_action). "
+        help="Enable six-dimensional scoring mode (object/count/attribute/spatial_action/semantic/text_content). "
              "Scores are semi-discrete: {0.0, 0.25, 0.5, 0.75, 1.0}."
     )
     return parser.parse_args()
@@ -597,12 +579,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    # Scored mode uses a separate output directory to avoid mixing with legacy results
-    legacy_output_dir: Path | None = None
     if args.use_scored:
         base = args.output_dir.rstrip("/")
         if not base.endswith("_scored"):
-            legacy_output_dir = Path(base)
             args.output_dir = base + "_scored"
     output_dir = ensure_dir(args.output_dir)
     logger = setup_logger("table3", log_file=str(output_dir / "table3.log"))
@@ -746,16 +725,12 @@ def main():
                 if c.verifier is None:
                     needed_step0.add(c.id)
 
-            # In scored mode, reuse step-0 images from the legacy directory via symlinks
-            fallback_bench_dir = (legacy_output_dir / benchmark) if legacy_output_dir else None
-
             for cid in sorted(needed_step0):
                 c = CONDITIONS_BY_ID[cid]
                 logger.info(f"\n  Condition {c.id}: {c.name}")
                 images = run_step0_generation(
                     c, samples, bench_dir, logger,
                     batch_size=args.batch_size, num_workers=args.num_workers,
-                    fallback_dir=fallback_bench_dir,
                 )
                 step0_cache[c.id] = images
 

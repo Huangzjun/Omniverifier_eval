@@ -5,8 +5,8 @@ for image-prompt alignment verification.
 
 Supports two verification modes:
   1. Legacy mode: simple true/false with explanation and edit_prompt
-  2. Scored mode: four-dimensional scoring (object, count, attribute, spatial_action)
-     with semi-discrete scores {0.0, 0.25, 0.5, 0.75, 1.0}
+  2. Scored mode: six-dimensional scoring (object, count, attribute, spatial_action,
+     semantic, text_content) with semi-discrete scores {0.0, 0.25, 0.5, 0.75, 1.0}
 
 The model uses <think>...</think> tags for chain-of-thought reasoning,
 and the JSON answer follows after the closing </think> tag.
@@ -157,7 +157,7 @@ class OmniVerifier:
 
     And two verification modes:
     1. Legacy (use_scored=False): simple true/false
-    2. Scored (use_scored=True): four-dimensional scoring
+    2. Scored (use_scored=True): six-dimensional scoring
     """
 
     def __init__(
@@ -212,8 +212,8 @@ class OmniVerifier:
         )
         self._sampling_params = SamplingParams(
             max_tokens=self.max_new_tokens,
-            temperature=0.1,
-            top_p=0.95,
+            temperature=0.0,
+            top_p=1.0,
         )
         print("[OmniVerifier] vLLM model loaded successfully")
 
@@ -240,7 +240,7 @@ class OmniVerifier:
         )
 
     def _verify_scored(self, image: Image.Image, prompt: str) -> VerificationResult:
-        """Scored verification: four-dimensional scoring."""
+        """Scored verification: six-dimensional scoring."""
         if self.use_vllm:
             raw_output = self._infer_vllm(image, prompt, scored=True)
         else:
@@ -296,6 +296,8 @@ class OmniVerifier:
         generated_ids = self._model.generate(
             **inputs,
             max_new_tokens=self.max_new_tokens,
+            temperature=0.0,
+            do_sample=False,
         )
         generated_ids_trimmed = [
             out_ids[len(in_ids):]
